@@ -1,5 +1,4 @@
 #!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
-
-pnpm biome check --write
-pnpm test:canon
+set -e
+npx vitest run
+npx tsc --noEmit

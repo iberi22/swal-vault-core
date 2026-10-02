@@ -110,3 +110,90 @@ describe('browser-safe', () => {
     }
   });
 });
+
+import { MemoryCloudShareStore, R2StorageClient, storeCloudShare, registerOnPolygon, PACK_VERSION } from '../src/index.js';
+import { bs, fromBase64, toBase64, utf8, concatBytes } from '../src/bytes.js';
+
+const flip = (b64: string) => { const b = fromBase64(b64); b[0] ^= 1; return toBase64(b); };
+
+describe('propiedades Shamir', () => {
+  it('cualquier par de 3 reconstruye (200 DEK aleatorias) y una share sola no', () => {
+    for (let i = 0; i < 200; i++) {
+      const dek = randomBytes(32);
+      const s = splitDEK(dek);
+      for (const [a, b] of [[0, 1], [0, 2], [1, 2], [1, 0], [2, 1], [2, 0]]) expect(reconstructDEK([s[a], s[b]])).toEqual(dek);
+      expect(() => reconstructDEK([s[0]])).toThrow();
+      expect(() => reconstructDEK([s[1], s[1]])).toThrow();
+      // una share sola no da informacion directa: usarla como "DEK" con otra falsa no reconstruye
+      expect(reconstructDEK([s[0], { index: 2, value: toBase64(randomBytes(32)) }])).not.toEqual(dek);
+    }
+  });
+});
+
+describe('AAD y manipulacion (V6)', () => {
+  const payload = utf8('secreto');
+  it('pack v2 con metadatos: rechaza metadata, tag, ciphertext, iv y v alterados', async () => {
+    const pack = await createSealedPack(payload, { entity: 'x', appId: 'a', timestamp: 5 });
+    expect(pack.v).toBe(PACK_VERSION);
+    const sh = pack.shares.slice(0, 2);
+    expect(await unpackSealedPack(pack, sh)).toEqual(payload);
+    await expect(unpackSealedPack({ ...pack, metadata: { ...pack.metadata, appId: 'b' } }, sh)).rejects.toBeDefined();
+    await expect(unpackSealedPack({ ...pack, metadata: { ...pack.metadata, extra: 1 } }, sh)).rejects.toBeDefined();
+    await expect(unpackSealedPack({ ...pack, tag: flip(pack.tag) }, sh)).rejects.toBeDefined();
+    await expect(unpackSealedPack({ ...pack, ciphertext: flip(pack.ciphertext) }, sh)).rejects.toBeDefined();
+    await expect(unpackSealedPack({ ...pack, iv: flip(pack.iv) }, sh)).rejects.toBeDefined();
+    const { v: _v, ...downgraded } = pack; // quitar `v` para saltar el AAD
+    await expect(unpackSealedPack(downgraded as any, sh)).rejects.toBeDefined();
+    await expect(unpackSealedPack({ ...pack, v: 99 }, sh)).rejects.toThrow(/Version/);
+    await expect(unpackSealedPack(pack, [pack.shares[0], { ...pack.shares[1], value: flip(pack.shares[1].value) }])).rejects.toBeDefined();
+  });
+  it('lista blanca de metadatos en claro', async () => {
+    await expect(createSealedPack(payload, { timestamp: 1, nombre: 'Ana' })).rejects.toThrow(/lista blanca/);
+    const p = await createSealedPack(payload, { timestamp: 1, nombre: 'Ana' }, undefined, { extraClearKeys: ['nombre'] });
+    expect(await unpackSealedPack(p, p.shares.slice(1))).toEqual(payload);
+  });
+  it('lee packs legado (sin v, sin AAD)', async () => {
+    const dek = randomBytes(32), iv = randomBytes(12);
+    const key = await globalThis.crypto.subtle.importKey('raw', bs(dek), 'AES-GCM', false, ['encrypt']);
+    const sealed = new Uint8Array(await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128 }, key, bs(payload)));
+    const ct = sealed.subarray(0, sealed.length - 16), tag = sealed.subarray(sealed.length - 16);
+    const pack: any = {
+      id: 'legacy', content_hash: await computeContentHashAsync(ct, meta), ciphertext: toBase64(ct), iv: toBase64(iv),
+      tag: toBase64(tag), shares: splitDEK(dek), signature: '', publicKey: '', metadata: meta, chain: 'polygon', chainId: 137,
+    };
+    expect(await unpackSealedPack(pack, pack.shares.slice(0, 2))).toEqual(payload);
+  });
+  it('compatibilidad Node webcrypto <-> vault (AAD v2)', async () => {
+    const p = await createSealedPack(payload, meta);
+    const dek = reconstructDEK(p.shares.slice(1));
+    const key = await globalThis.crypto.subtle.importKey('raw', bs(dek), 'AES-GCM', false, ['decrypt']);
+    const aad = utf8(`swal-vault/v2|{"entity":"x","timestamp":1}`);
+    const dec = await globalThis.crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bs(fromBase64(p.iv)), tagLength: 128, additionalData: bs(aad) }, key, bs(concatBytes(fromBase64(p.ciphertext), fromBase64(p.tag))));
+    expect(new Uint8Array(dec)).toEqual(payload);
+  });
+});
+
+describe('frontera de nube (V1/V8/V9)', () => {
+  it('uploadSealedPack rechaza >=2 shares y nunca sube shares', async () => {
+    const pack = await createSealedPack(utf8('x'), meta);
+    const puts: string[] = [];
+    const r2 = new R2StorageClient({ r2Binding: { put: async (_k: string, body: string) => { puts.push(body); } } });
+    await expect(r2.uploadSealedPack(pack)).rejects.toThrow(/E2EE/);
+    await expect(r2.uploadSealedPack({ ...pack, shares: pack.shares.slice(0, 2) })).rejects.toThrow(/E2EE/);
+    expect(puts.length).toBe(0);
+    const { key } = await r2.uploadSealedPack({ ...pack, shares: [pack.shares[2]] });
+    expect(JSON.parse(puts[0]).shares).toEqual([]);
+    expect((await r2.getSealedPack(key))!.shares).toEqual([]);
+    await r2.uploadSealedPack({ ...pack, shares: [] });
+  });
+  it('CloudShareStore guarda solo x=3; registerOnPolygon no esta implementado', async () => {
+    const pack = await createSealedPack(utf8('x'), meta);
+    const st = new MemoryCloudShareStore();
+    await storeCloudShare(st, pack);
+    expect((await st.get(pack.id))!.index).toBe(3);
+    await expect(st.put('z', pack.shares[0])).rejects.toThrow();
+    await expect(storeCloudShare(st, { ...pack, shares: [pack.shares[0]] })).rejects.toThrow();
+    expect(() => registerOnPolygon(pack)).toThrow(/not implemented/);
+  });
+});

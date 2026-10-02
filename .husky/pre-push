@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -e
+npx vitest run
+npx tsc --noEmit
