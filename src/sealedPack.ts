@@ -10,19 +10,20 @@ import {
 
 const subtle = () => globalThis.crypto.subtle;
 
-// Lazy import econ-sdk solo si hay chain (no requerido para vault puro)
-// Si no hay @swal/econ instalado (ej hosteler-ia), fallback a polygon defaults
-let _econChain = 'polygon';
-let _econChainId = 137;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const econ = require('@swal/econ-sdk');
-  if (econ?.defaultChainRegistry) {
-    const r = econ.defaultChainRegistry.getRouteInfo('gara-g');
-    _econChain = r.chain ?? 'polygon';
-    _econChainId = r.chainId ?? 137;
-  }
-} catch {}
+// Cadena de anclaje por defecto (sin dependencia de @swal/econ-sdk; el vault es puro).
+const _econChain = 'polygon';
+const _econChainId = 137;
+
+/** Version de formato del pack. Ausente = legado (sin AAD). 2 = metadatos ligados como AAD de AES-GCM. */
+export const PACK_VERSION = 2;
+
+/**
+ * Lista blanca de metadatos que pueden viajar EN CLARO junto al pack. Todo lo que no este aqui
+ * se rechaza al sellar (salvo `extraClearKeys` explicito): los metadatos no van cifrados.
+ */
+export const CLEAR_METADATA_KEYS: readonly string[] = [
+  'vehicleId', 'entityId', 'entity', 'appId', 'instanceId', 'timestamp', 'recordCount', 'deviceId',
+];
 
 export interface DEKShare {
   index: number;
@@ -43,6 +44,8 @@ export interface SealedPackMetadata {
 }
 
 export interface SealedPack {
+  /** Version de formato. Ausente = legado sin AAD. */
+  v?: number;
   id: string;
   content_hash: string;
   ciphertext: string;
@@ -112,6 +115,30 @@ export function reconstructDEK(shares: DEKShare[]): Uint8Array {
   const dek = new Uint8Array(32);
   for (let i = 0; i < 32; i++) dek[i] = mod257(y1[i] * L1 + y2[i] * L2);
   return dek;
+}
+
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).sort().filter((k) => o[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/** AAD de AES-GCM (v2): los metadatos quedan autenticados; alterarlos rompe el descifrado. */
+function metadataAad(metadata: SealedPackMetadata): Uint8Array {
+  return utf8(`swal-vault/v${PACK_VERSION}|${canonicalJson(metadata)}`);
+}
+
+function assertMetadataWhitelisted(metadata: SealedPackMetadata, extra: readonly string[]): void {
+  const allowed = new Set([...CLEAR_METADATA_KEYS, ...extra]);
+  for (const k of Object.keys(metadata)) {
+    if (!allowed.has(k)) {
+      throw new Error(`Metadato "${k}" no esta en la lista blanca de metadatos en claro (usa extraClearKeys si es intencional)`);
+    }
+  }
 }
 
 function contentHashInput(ciphertext: Uint8Array, metadata: SealedPackMetadata): Uint8Array {
@@ -202,12 +229,14 @@ export async function createSealedPack(
   payload: Uint8Array,
   metadata: SealedPackMetadata,
   keyPair?: SealedPackKeyPair,
+  options: { extraClearKeys?: string[] } = {},
 ): Promise<SealedPack> {
+  assertMetadataWhitelisted(metadata, options.extraClearKeys ?? []);
   const dek = randomBytes(32);
   const iv = randomBytes(12);
   // WebCrypto devuelve ciphertext||tag(16); se separan para mantener el formato del pack.
   const sealed = new Uint8Array(
-    await subtle().encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128 }, await aesKey(dek, 'encrypt'), bs(payload)),
+    await subtle().encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128, additionalData: bs(metadataAad(metadata)) }, await aesKey(dek, 'encrypt'), bs(payload)),
   );
   const ct = sealed.subarray(0, sealed.length - 16);
   const tag = sealed.subarray(sealed.length - 16);
@@ -216,6 +245,7 @@ export async function createSealedPack(
   const { priv, pubSpki } = await resolveKeyPair(keyPair);
   const sig = new Uint8Array(await subtle().sign({ name: 'Ed25519' }, priv, bs(utf8(contentHash))));
   return {
+    v: PACK_VERSION,
     id: `pack-${globalThis.crypto.randomUUID()}`,
     content_hash: contentHash,
     ciphertext: toBase64(ct),
@@ -235,8 +265,12 @@ export async function unpackSealedPack(pack: SealedPack, shares: DEKShare[]): Pr
   const ct = fromBase64(pack.ciphertext);
   const iv = fromBase64(pack.iv);
   const tag = fromBase64(pack.tag);
+  if (pack.v !== undefined && pack.v !== PACK_VERSION) throw new Error(`Version de pack no soportada: ${pack.v}`);
+  // Legado (sin `v`): sin AAD. Un pack v2 al que se le quita `v` falla por tag al no coincidir el AAD.
+  const params: AesGcmParams = { name: 'AES-GCM', iv: bs(iv), tagLength: 128 };
+  if (pack.v === PACK_VERSION) params.additionalData = bs(metadataAad(pack.metadata));
   const dec = await subtle().decrypt(
-    { name: 'AES-GCM', iv: bs(iv), tagLength: 128 },
+    params,
     await aesKey(dek, 'decrypt'),
     bs(concatBytes(ct, tag)),
   );
@@ -263,47 +297,10 @@ export function packMetadataForEntity(entity: string, id: string, appId: string,
   return { entity, entityId: id, appId, instanceId, timestamp: Date.now() };
 }
 
-// Compat legacy gara-g: registerOnPolygon (antes en app-pwa sealedPack)
-// Usa econ-sdk si está disponible, sino no-op con shape compatible con tests
-export function registerOnPolygon(
-  pack: SealedPack,
-  bus?: any,
-): { targetChain: string; event: any; docPath: string } {
-  const targetChain = pack.chain ?? _econChain;
-  const event = {
-    actionType: 'SEALED_PACK_ANCHOR',
-    value: pack.content_hash,
-    appId: (pack.metadata.appId as string) || 'gara-g',
-  };
-  const docPath = `swal/${(pack.metadata.appId as string) || 'gara-g'}/econ`;
-  try {
-    if (bus?.emitEconEvent) {
-      return bus.emitEconEvent({
-        appId: event.appId,
-        nodeId: (pack.metadata.vehicleId as string) || (pack.metadata.entityId as string) || 'node-gara-g',
-        walletAddress: pack.publicKey ? `0x${pack.publicKey.slice(0, 40)}` : '0x0000000000000000000000000000000000000000',
-        actionType: event.actionType,
-        value: event.value,
-        ts: (pack.metadata.timestamp as number) || Date.now(),
-        signature: pack.signature,
-      });
-    }
-    if (bus?.getRegistry) {
-      try {
-        const { EconEventBus: Bus } = require('@swal/econ-sdk');
-        const b = new Bus();
-        return b.emitEconEvent({
-          appId: event.appId,
-          nodeId: (pack.metadata.vehicleId as string) || 'node',
-          walletAddress: pack.publicKey ? `0x${pack.publicKey.slice(0, 40)}` : '0x0',
-          actionType: event.actionType,
-          value: event.value,
-          ts: Date.now(),
-          signature: pack.signature,
-        });
-      } catch {}
-    }
-  } catch {}
-  // fallback shape que esperan tests gara-g (targetChain polygon, event.value == hash)
-  return { targetChain, event, docPath };
+/**
+ * @deprecated Eliminado: la version anterior fabricaba un `walletAddress` falso (0x + prefijo de la
+ * publicKey) y emitia eventos con el. El anclaje real en Polygon aun no esta implementado.
+ */
+export function registerOnPolygon(_pack: SealedPack, _bus?: unknown): never {
+  throw new Error('registerOnPolygon: not implemented');
 }
