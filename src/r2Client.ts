@@ -3,7 +3,7 @@
 // Si hay binding SWAL_R2 (Cloudflare), usa R2 real via fetch/Worker. Si no, memoryStore (mesh-only P2P replica).
 // Path generico: packs/{appId}/{instanceId}/{entity}/{content_hash}.json
 import type { SealedPack, SealedPackMetadata } from './sealedPack.js';
-import { verifySealedPackHash } from './sealedPack.js';
+import { assertCloudSharesSafe, packWithoutShares, verifySealedPackHash } from './sealedPack.js';
 
 export interface R2ClientConfig {
   bucketName?: string;
@@ -43,8 +43,14 @@ export class R2StorageClient {
     return `packs/${app}/${inst}/${entity}/${pack.content_hash}.json`;
   }
 
-  async uploadSealedPack(pack: SealedPack): Promise<{ url: string; contentHash: string; key: string }> {
-    if (!pack?.content_hash) throw new Error('SealedPack sin content_hash');
+  /**
+   * Sube el pack SIN shares (frontera E2EE). Lanza si el pack trae >=2 shares: el llamador debe
+   * quitar los shares 1 y 2 y guardar el 3 aparte (ver `CloudShareStore`).
+   */
+  async uploadSealedPack(input: SealedPack): Promise<{ url: string; contentHash: string; key: string }> {
+    if (!input?.content_hash) throw new Error('SealedPack sin content_hash');
+    assertCloudSharesSafe(input.shares?.length ?? 0);
+    const pack = packWithoutShares(input);
     const ok = await verifySealedPackHash(pack);
     if (!ok) throw new Error('SealedPack content_hash mismatch');
 

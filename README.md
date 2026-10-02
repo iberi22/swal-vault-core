@@ -16,17 +16,32 @@ import { createSealedPack, unpackSealedPack, R2StorageClient } from '@swal/vault
 const payload = new TextEncoder().encode(JSON.stringify({ plate: 'ABC123', km: 50000 }));
 const pack = await createSealedPack(payload, { entity:'vehicle', entityId: rec.id, appId, instanceId, timestamp: Date.now() });
 
-// subir (si hay SWAL_R2 binding, va a R2 real; si no, memory mesh)
+// subir: el cliente SOLO acepta packs con <2 shares y sube siempre packWithoutShares.
+// Shares 1 (dispositivo) y 2 (recuperacion) NUNCA salen del cliente; solo el x=3 puede ir a la nube.
 const r2 = new R2StorageClient({ appId, instanceId, r2Binding: env.SWAL_R2 });
-await r2.uploadSealedPack(pack);
+await r2.uploadSealedPack(packWithoutShares(pack));       // pasar el pack completo lanza error E2EE
+await storeCloudShare(shareStore, pack);                  // guarda solo x=3 (CloudShareStore: D1 recomendado)
 
-// leer
+// leer (el pack de R2 no trae shares; combina las que tengas localmente)
 const got = await r2.getSealedPack(pack.content_hash);
-const plain = await unpackSealedPack(got!, pack.shares.slice(0,2));
+const plain = await unpackSealedPack(got!, [deviceShare, recoveryShare]);
 ```
 
 Path R2: `packs/{appId}/{instanceId}/{entity}/{content_hash}.json`
-Shares: 2/3 Shamir GF257 reconstruye DEK. Guarda 1 share en KV, 1 en D1 cifrado, 1 local.
+Shares: 2/3 Shamir GF257 reconstruye DEK. x=1 en el dispositivo, x=2 de recuperacion (usuario), x=3 unico share en la nube.
+La nube (R2+D1+KV) nunca debe acumular 2 shares.
+
+### Share de nube: D1 mejor que KV
+`CloudShareStore` (`put/get/delete`) es una interfaz agnostica; hay `MemoryCloudShareStore` para tests. KV cobra 1 escritura
+por registro y la cuenta de Cloudflare tiene **1.000 escrituras KV/dia compartidas por todos los proyectos**; guarda el share x=3 en D1 (100.000 filas/dia).
+
+### Formato y metadatos
+`pack.v = 2`: los metadatos se ligan como AAD de AES-GCM (alterarlos, o el tag/ciphertext, rompe el descifrado). Los metadatos viajan en
+claro; solo se admiten las claves de `CLEAR_METADATA_KEYS` (o `extraClearKeys` explicito en `createSealedPack`). Los packs sin `v` (legado) se siguen leyendo.
+`registerOnPolygon` esta eliminado (lanza `not implemented`): el anclaje real no existe aun.
+
+### Gate local
+`.husky/pre-commit` y `pre-push` ejecutan `vitest run` y `tsc --noEmit` (`pnpm install` activa `core.hooksPath`).
 
 ## Reuso
 - gara-g: vehicle/fleet/telemetry -> sealed
