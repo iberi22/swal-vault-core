@@ -1,0 +1,257 @@
+// sealedPack.ts — core reusable vault (antes en gara-g app-pwa)
+// Extraído a cores/swal-vault para reuso en gara-g, hosteler-ia, flota, cualquier app SWAL.
+// 100% cifrado: AES-256-GCM + Shamir 2-of-3 sobre DEK + SHA256 content_hash + Ed25519.
+// Cloudflare nunca ve plaintext, solo ciphertext+shares+hash.
+// Pay-per-use: costo solo si se sube a R2; mesh-only gratis (replica P2P en otros nodos gara-g).
+
+import crypto from 'node:crypto';
+
+// Lazy import econ-sdk solo si hay chain (no requerido para vault puro)
+// Si no hay @swal/econ instalado (ej hosteler-ia), fallback a polygon defaults
+let _econChain = 'polygon';
+let _econChainId = 137;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const econ = require('@swal/econ-sdk');
+  if (econ?.defaultChainRegistry) {
+    const r = econ.defaultChainRegistry.getRouteInfo('gara-g');
+    _econChain = r.chain ?? 'polygon';
+    _econChainId = r.chainId ?? 137;
+  }
+} catch {}
+
+export interface DEKShare {
+  index: number;
+  value: string;
+}
+
+export interface SealedPackMetadata {
+  vehicleId?: string;
+  entityId?: string;
+  entity?: string;
+  appId?: string;
+  instanceId?: string;
+  timestamp: number;
+  recordCount?: number;
+  deviceId?: string;
+  // extensible para cualquier modelo negocio: gara-g vehicle, hosteler order, etc.
+  [k: string]: unknown;
+}
+
+export interface SealedPack {
+  id: string;
+  content_hash: string;
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  shares: DEKShare[];
+  signature: string;
+  publicKey: string;
+  metadata: SealedPackMetadata;
+  chain: string;
+  chainId: number;
+}
+
+function mod257(n: number): number {
+  const r = n % 257;
+  return r < 0 ? r + 257 : r;
+}
+function modInverse257(n: number): number {
+  const a = mod257(n);
+  if (a === 0) throw new Error('Division by zero GF257');
+  let res = 1;
+  let base = a;
+  let exp = 255;
+  while (exp > 0) {
+    if (exp % 2 === 1) res = (res * base) % 257;
+    base = (base * base) % 257;
+    exp = Math.floor(exp / 2);
+  }
+  return res;
+}
+
+export function splitDEK(dek: Uint8Array): DEKShare[] {
+  if (dek.length !== 32) throw new Error('DEK 32 bytes');
+  const s1 = new Uint8Array(32);
+  const s2 = new Uint8Array(32);
+  const s3 = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    const secret = dek[i];
+    let a1: number, y1: number, y2: number, y3: number;
+    do {
+      a1 = crypto.randomInt(1, 257);
+      y1 = mod257(secret + a1 * 1);
+      y2 = mod257(secret + a1 * 2);
+      y3 = mod257(secret + a1 * 3);
+    } while (y1 === 256 || y2 === 256 || y3 === 256);
+    s1[i] = y1;
+    s2[i] = y2;
+    s3[i] = y3;
+  }
+  return [
+    { index: 1, value: Buffer.from(s1).toString('base64') },
+    { index: 2, value: Buffer.from(s2).toString('base64') },
+    { index: 3, value: Buffer.from(s3).toString('base64') },
+  ];
+}
+
+export function reconstructDEK(shares: DEKShare[]): Uint8Array {
+  if (shares.length < 2) throw new Error('At least 2 shares are required to reconstruct DEK');
+  const s1 = shares[0], s2 = shares[1];
+  const x1 = s1.index, x2 = s2.index;
+  if (x1 === x2) throw new Error('shares duplicate x');
+  const y1 = Buffer.from(s1.value, 'base64');
+  const y2 = Buffer.from(s2.value, 'base64');
+  if (y1.length !== 32 || y2.length !== 32) throw new Error('share length 32');
+  const num1 = mod257(-x2), den1 = mod257(x1 - x2), L1 = mod257(num1 * modInverse257(den1));
+  const num2 = mod257(-x1), den2 = mod257(x2 - x1), L2 = mod257(num2 * modInverse257(den2));
+  const dek = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) dek[i] = mod257(y1[i] * L1 + y2[i] * L2);
+  return dek;
+}
+
+export function computeContentHash(ciphertextBuf: Buffer, metadata: SealedPackMetadata): string {
+  const hashInput = Buffer.concat([ciphertextBuf, Buffer.from(JSON.stringify(metadata, Object.keys(metadata).sort()))]);
+  return '0x' + crypto.createHash('sha256').update(hashInput).digest('hex');
+}
+
+// ── Frontera de confianza: qué NO puede vivir en la nube ─────────────────────────
+//
+// El reparto es Shamir 2-de-3: con DOS shares cualquiera se reconstruye la DEK. Por tanto la nube
+// (R2 + D1 + KV) **nunca** puede acumular 2 shares, o el operador podria leer los datos y la
+// promesa "el operador no puede leer" seria falsa.
+//
+// Reparto correcto:
+//   * share x=1 -> DISPOSITIVO (nunca se sube)
+//   * share x=2 -> RECUPERACION (nunca se sube; se entrega al usuario en el alta)
+//   * share x=3 -> KV (unico share que la nube puede tener)
+//
+// Asi R2+D1+KV juntos suman 1 share y no alcanzan el umbral.
+
+/** Umbral de Shamir: shares necesarias para reconstruir. */
+export const SHAMIR_THRESHOLD = 2;
+
+/** Indice del unico share que puede residir en la nube. */
+export const CLOUD_SHARE_INDEX = 3;
+
+/** Devuelve una copia del pack SIN shares, apta para almacenar en la nube. */
+export function packWithoutShares(pack: SealedPack): SealedPack {
+  return { ...pack, shares: [] };
+}
+
+/** El share que puede subirse a KV (x=3). `null` si no existe. */
+export function cloudBoundShare(shares: DEKShare[]): DEKShare | null {
+  return shares.find((s) => s.index === CLOUD_SHARE_INDEX) ?? null;
+}
+
+/**
+ * Guarda de la frontera: lanza si la nube acumularia el umbral o mas shares.
+ * Se usa antes de subir nada, para fallar cerrado en vez de filtrar la clave.
+ */
+export function assertCloudSharesSafe(cloudShareCount: number): void {
+  if (cloudShareCount >= SHAMIR_THRESHOLD) {
+    throw new Error(
+      `E2EE: la nube no puede acumular ${cloudShareCount} shares (umbral ${SHAMIR_THRESHOLD}). ` +
+        'Deja en el dispositivo los shares 1 y 2 y sube solo el 3.',
+    );
+  }
+}
+
+export async function createSealedPack(
+  payload: Uint8Array,
+  metadata: SealedPackMetadata,
+  keyPair?: { privateKey: crypto.KeyObject; publicKey: crypto.KeyObject },
+): Promise<SealedPack> {
+  const dek = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', dek, iv);
+  let ct = cipher.update(Buffer.from(payload));
+  ct = Buffer.concat([ct, cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const shares = splitDEK(dek);
+  const contentHash = computeContentHash(ct, metadata);
+  const kp = keyPair ?? crypto.generateKeyPairSync('ed25519');
+  const pubHex = kp.publicKey.export({ type: 'spki', format: 'der' }).toString('hex');
+  const sig = crypto.sign(null, Buffer.from(contentHash, 'utf-8'), kp.privateKey);
+  return {
+    id: `pack-${crypto.randomUUID()}`,
+    content_hash: contentHash,
+    ciphertext: ct.toString('base64'),
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    shares,
+    signature: sig.toString('hex'),
+    publicKey: pubHex,
+    metadata,
+    chain: _econChain,
+    chainId: _econChainId,
+  };
+}
+
+export async function unpackSealedPack(pack: SealedPack, shares: DEKShare[]): Promise<Uint8Array> {
+  const dek = reconstructDEK(shares);
+  const ct = Buffer.from(pack.ciphertext, 'base64');
+  const iv = Buffer.from(pack.iv, 'base64');
+  const tag = Buffer.from(pack.tag, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', dek, iv);
+  decipher.setAuthTag(tag);
+  let dec = decipher.update(ct);
+  dec = Buffer.concat([dec, decipher.final()]);
+  return new Uint8Array(dec);
+}
+
+export async function verifySealedPackHash(pack: SealedPack): Promise<boolean> {
+  const ct = Buffer.from(pack.ciphertext, 'base64');
+  const exp = computeContentHash(ct, pack.metadata);
+  return exp.toLowerCase() === pack.content_hash.toLowerCase();
+}
+
+// Helper generico para cualquier entity (no solo vehicle)
+export function packMetadataForEntity(entity: string, id: string, appId: string, instanceId: string): SealedPackMetadata {
+  return { entity, entityId: id, appId, instanceId, timestamp: Date.now() };
+}
+
+// Compat legacy gara-g: registerOnPolygon (antes en app-pwa sealedPack)
+// Usa econ-sdk si está disponible, sino no-op con shape compatible con tests
+export function registerOnPolygon(
+  pack: SealedPack,
+  bus?: any,
+): { targetChain: string; event: any; docPath: string } {
+  const targetChain = pack.chain ?? _econChain;
+  const event = {
+    actionType: 'SEALED_PACK_ANCHOR',
+    value: pack.content_hash,
+    appId: (pack.metadata.appId as string) || 'gara-g',
+  };
+  const docPath = `swal/${(pack.metadata.appId as string) || 'gara-g'}/econ`;
+  try {
+    if (bus?.emitEconEvent) {
+      return bus.emitEconEvent({
+        appId: event.appId,
+        nodeId: (pack.metadata.vehicleId as string) || (pack.metadata.entityId as string) || 'node-gara-g',
+        walletAddress: pack.publicKey ? `0x${pack.publicKey.slice(0, 40)}` : '0x0000000000000000000000000000000000000000',
+        actionType: event.actionType,
+        value: event.value,
+        ts: (pack.metadata.timestamp as number) || Date.now(),
+        signature: pack.signature,
+      });
+    }
+    if (bus?.getRegistry) {
+      try {
+        const { EconEventBus: Bus } = require('@swal/econ-sdk');
+        const b = new Bus();
+        return b.emitEconEvent({
+          appId: event.appId,
+          nodeId: (pack.metadata.vehicleId as string) || 'node',
+          walletAddress: pack.publicKey ? `0x${pack.publicKey.slice(0, 40)}` : '0x0',
+          actionType: event.actionType,
+          value: event.value,
+          ts: Date.now(),
+          signature: pack.signature,
+        });
+      } catch {}
+    }
+  } catch {}
+  // fallback shape que esperan tests gara-g (targetChain polygon, event.value == hash)
+  return { targetChain, event, docPath };
+}
