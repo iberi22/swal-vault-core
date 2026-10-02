@@ -4,7 +4,11 @@
 // Cloudflare nunca ve plaintext, solo ciphertext+shares+hash.
 // Pay-per-use: costo solo si se sube a R2; mesh-only gratis (replica P2P en otros nodos gara-g).
 
-import crypto from 'node:crypto';
+import {
+  bs, concatBytes, fromBase64, fromHex, randomBytes, randomInt, sha256, sha256Sync, toBase64, toHex, utf8,
+} from './bytes.js';
+
+const subtle = () => globalThis.crypto.subtle;
 
 // Lazy import econ-sdk solo si hay chain (no requerido para vault puro)
 // Si no hay @swal/econ instalado (ej hosteler-ia), fallback a polygon defaults
@@ -79,7 +83,7 @@ export function splitDEK(dek: Uint8Array): DEKShare[] {
     const secret = dek[i];
     let a1: number, y1: number, y2: number, y3: number;
     do {
-      a1 = crypto.randomInt(1, 257);
+      a1 = randomInt(1, 257);
       y1 = mod257(secret + a1 * 1);
       y2 = mod257(secret + a1 * 2);
       y3 = mod257(secret + a1 * 3);
@@ -89,9 +93,9 @@ export function splitDEK(dek: Uint8Array): DEKShare[] {
     s3[i] = y3;
   }
   return [
-    { index: 1, value: Buffer.from(s1).toString('base64') },
-    { index: 2, value: Buffer.from(s2).toString('base64') },
-    { index: 3, value: Buffer.from(s3).toString('base64') },
+    { index: 1, value: toBase64(s1) },
+    { index: 2, value: toBase64(s2) },
+    { index: 3, value: toBase64(s3) },
   ];
 }
 
@@ -100,8 +104,8 @@ export function reconstructDEK(shares: DEKShare[]): Uint8Array {
   const s1 = shares[0], s2 = shares[1];
   const x1 = s1.index, x2 = s2.index;
   if (x1 === x2) throw new Error('shares duplicate x');
-  const y1 = Buffer.from(s1.value, 'base64');
-  const y2 = Buffer.from(s2.value, 'base64');
+  const y1 = fromBase64(s1.value);
+  const y2 = fromBase64(s2.value);
   if (y1.length !== 32 || y2.length !== 32) throw new Error('share length 32');
   const num1 = mod257(-x2), den1 = mod257(x1 - x2), L1 = mod257(num1 * modInverse257(den1));
   const num2 = mod257(-x1), den2 = mod257(x2 - x1), L2 = mod257(num2 * modInverse257(den2));
@@ -110,9 +114,20 @@ export function reconstructDEK(shares: DEKShare[]): Uint8Array {
   return dek;
 }
 
-export function computeContentHash(ciphertextBuf: Buffer, metadata: SealedPackMetadata): string {
-  const hashInput = Buffer.concat([ciphertextBuf, Buffer.from(JSON.stringify(metadata, Object.keys(metadata).sort()))]);
-  return '0x' + crypto.createHash('sha256').update(hashInput).digest('hex');
+function contentHashInput(ciphertext: Uint8Array, metadata: SealedPackMetadata): Uint8Array {
+  return concatBytes(ciphertext, utf8(JSON.stringify(metadata, Object.keys(metadata).sort())));
+}
+
+/**
+ * @deprecated Usa `computeContentHashAsync` (WebCrypto). Se mantiene sincrono (SHA-256 JS puro)
+ * solo por compatibilidad; produce el mismo resultado.
+ */
+export function computeContentHash(ciphertext: Uint8Array, metadata: SealedPackMetadata): string {
+  return '0x' + toHex(sha256Sync(contentHashInput(ciphertext, metadata)));
+}
+
+export async function computeContentHashAsync(ciphertext: Uint8Array, metadata: SealedPackMetadata): Promise<string> {
+  return '0x' + toHex(await sha256(contentHashInput(ciphertext, metadata)));
 }
 
 // ── Frontera de confianza: qué NO puede vivir en la nube ─────────────────────────
@@ -157,31 +172,58 @@ export function assertCloudSharesSafe(cloudShareCount: number): void {
   }
 }
 
+/**
+ * Par de claves Ed25519. Acepta CryptoKeyPair (WebCrypto) o, por compat, el par de
+ * `KeyObject` de node (se detecta por duck-typing, sin depender de modulos de node).
+ */
+export type SealedPackKeyPair =
+  | CryptoKeyPair
+  | { privateKey: { export(o: { type: 'pkcs8'; format: 'der' }): Uint8Array }; publicKey: { export(o: { type: 'spki'; format: 'der' }): Uint8Array } };
+
+async function resolveKeyPair(kp?: SealedPackKeyPair): Promise<{ priv: CryptoKey; pubSpki: Uint8Array }> {
+  if (!kp) {
+    const pair = (await subtle().generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+    return { priv: pair.privateKey, pubSpki: new Uint8Array(await subtle().exportKey('spki', pair.publicKey)) };
+  }
+  const priv = kp.privateKey as any;
+  if (typeof priv.export === 'function') {
+    const pkcs8 = new Uint8Array(priv.export({ type: 'pkcs8', format: 'der' }));
+    const pubSpki = new Uint8Array((kp.publicKey as any).export({ type: 'spki', format: 'der' }));
+    return { priv: await subtle().importKey('pkcs8', bs(pkcs8), { name: 'Ed25519' }, false, ['sign']), pubSpki };
+  }
+  return { priv: priv as CryptoKey, pubSpki: new Uint8Array(await subtle().exportKey('spki', kp.publicKey as CryptoKey)) };
+}
+
+async function aesKey(dek: Uint8Array, usage: 'encrypt' | 'decrypt'): Promise<CryptoKey> {
+  return subtle().importKey('raw', bs(dek), { name: 'AES-GCM' }, false, [usage]);
+}
+
 export async function createSealedPack(
   payload: Uint8Array,
   metadata: SealedPackMetadata,
-  keyPair?: { privateKey: crypto.KeyObject; publicKey: crypto.KeyObject },
+  keyPair?: SealedPackKeyPair,
 ): Promise<SealedPack> {
-  const dek = crypto.randomBytes(32);
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', dek, iv);
-  let ct = cipher.update(Buffer.from(payload));
-  ct = Buffer.concat([ct, cipher.final()]);
-  const tag = cipher.getAuthTag();
+  const dek = randomBytes(32);
+  const iv = randomBytes(12);
+  // WebCrypto devuelve ciphertext||tag(16); se separan para mantener el formato del pack.
+  const sealed = new Uint8Array(
+    await subtle().encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128 }, await aesKey(dek, 'encrypt'), bs(payload)),
+  );
+  const ct = sealed.subarray(0, sealed.length - 16);
+  const tag = sealed.subarray(sealed.length - 16);
   const shares = splitDEK(dek);
-  const contentHash = computeContentHash(ct, metadata);
-  const kp = keyPair ?? crypto.generateKeyPairSync('ed25519');
-  const pubHex = kp.publicKey.export({ type: 'spki', format: 'der' }).toString('hex');
-  const sig = crypto.sign(null, Buffer.from(contentHash, 'utf-8'), kp.privateKey);
+  const contentHash = await computeContentHashAsync(ct, metadata);
+  const { priv, pubSpki } = await resolveKeyPair(keyPair);
+  const sig = new Uint8Array(await subtle().sign({ name: 'Ed25519' }, priv, bs(utf8(contentHash))));
   return {
-    id: `pack-${crypto.randomUUID()}`,
+    id: `pack-${globalThis.crypto.randomUUID()}`,
     content_hash: contentHash,
-    ciphertext: ct.toString('base64'),
-    iv: iv.toString('base64'),
-    tag: tag.toString('base64'),
+    ciphertext: toBase64(ct),
+    iv: toBase64(iv),
+    tag: toBase64(tag),
     shares,
-    signature: sig.toString('hex'),
-    publicKey: pubHex,
+    signature: toHex(sig),
+    publicKey: toHex(pubSpki),
     metadata,
     chain: _econChain,
     chainId: _econChainId,
@@ -190,20 +232,30 @@ export async function createSealedPack(
 
 export async function unpackSealedPack(pack: SealedPack, shares: DEKShare[]): Promise<Uint8Array> {
   const dek = reconstructDEK(shares);
-  const ct = Buffer.from(pack.ciphertext, 'base64');
-  const iv = Buffer.from(pack.iv, 'base64');
-  const tag = Buffer.from(pack.tag, 'base64');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', dek, iv);
-  decipher.setAuthTag(tag);
-  let dec = decipher.update(ct);
-  dec = Buffer.concat([dec, decipher.final()]);
+  const ct = fromBase64(pack.ciphertext);
+  const iv = fromBase64(pack.iv);
+  const tag = fromBase64(pack.tag);
+  const dec = await subtle().decrypt(
+    { name: 'AES-GCM', iv: bs(iv), tagLength: 128 },
+    await aesKey(dek, 'decrypt'),
+    bs(concatBytes(ct, tag)),
+  );
   return new Uint8Array(dec);
 }
 
 export async function verifySealedPackHash(pack: SealedPack): Promise<boolean> {
-  const ct = Buffer.from(pack.ciphertext, 'base64');
-  const exp = computeContentHash(ct, pack.metadata);
+  const exp = await computeContentHashAsync(fromBase64(pack.ciphertext), pack.metadata);
   return exp.toLowerCase() === pack.content_hash.toLowerCase();
+}
+
+/** Verifica la firma Ed25519 del content_hash con la publicKey del pack. */
+export async function verifySealedPackSignature(pack: SealedPack): Promise<boolean> {
+  try {
+    const key = await subtle().importKey('spki', bs(fromHex(pack.publicKey)), { name: 'Ed25519' }, false, ['verify']);
+    return await subtle().verify({ name: 'Ed25519' }, key, bs(fromHex(pack.signature)), bs(utf8(pack.content_hash)));
+  } catch {
+    return false;
+  }
 }
 
 // Helper generico para cualquier entity (no solo vehicle)

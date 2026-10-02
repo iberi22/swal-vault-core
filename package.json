@@ -1,14 +1,26 @@
 {
   "name": "@swal/vault",
-  "version": "0.1.0",
-  "description": "SWAL Vault Core — AES-GCM + Shamir 2/3 + R2 encrypted adapter, reusable para gara-g/hosteler-ia/flota (pay-per-use 5% + mesh-only gratis)",
+  "version": "0.2.0",
+  "description": "SWAL Vault Core — AES-GCM + Shamir 2/3 + R2 encrypted adapter, reusable para gara-g/hosteler-ia/flota (pay-per-use 5% + mesh-only gratis). Browser-safe (WebCrypto).",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./web": "./src/web/vault-client.ts",
+    "./web.js": "./src/web/vault-client.ts",
     "./sealedPack": "./src/sealedPack.ts",
     "./sealedPack.js": "./src/sealedPack.ts",
     "./r2Client": "./src/r2Client.ts",
     "./r2Client.js": "./src/r2Client.ts"
   },
-  "private": true
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "fake-indexeddb": "6.2.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
 }
