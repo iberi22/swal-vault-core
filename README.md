@@ -211,6 +211,12 @@ Creates a browser vault manager backed by IndexedDB.
 
 ---
 
+## Releasing
+
+To publish a new version of the package, a repository secret named `NPM_TOKEN` must be configured in GitHub Actions. Pushing a tag that begins with `v` (e.g., `v1.0.0`) will automatically trigger the release workflow.
+
+---
+
 ## Development & Gate
 
 Run tests and typecheck verification:
