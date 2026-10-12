@@ -1,23 +1,51 @@
 {
   "name": "@swal/vault",
   "version": "0.2.0",
-  "description": "SWAL Vault Core — AES-GCM + Shamir 2/3 + R2 encrypted adapter, reusable para gara-g/hosteler-ia/flota (pay-per-use 5% + mesh-only gratis). Browser-safe (WebCrypto).",
+  "description": "SWAL Vault Core: browser-safe end-to-end encryption for local-first apps (AES-256-GCM AEAD, Shamir 2-of-3 key shares, Ed25519-signed sealed packs, optional R2 cloud share). WebCrypto only.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./web": "./src/web/vault-client.ts",
-    "./web.js": "./src/web/vault-client.ts",
-    "./sealedPack": "./src/sealedPack.ts",
-    "./sealedPack.js": "./src/sealedPack.ts",
-    "./r2Client": "./src/r2Client.ts",
-    "./r2Client.js": "./src/r2Client.ts",
-    "./cloudShare": "./src/cloudShare.ts",
-    "./cloudShare.js": "./src/cloudShare.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/web/vault-client.d.ts",
+      "import": "./dist/web/vault-client.js"
+    },
+    "./web.js": {
+      "types": "./dist/web/vault-client.d.ts",
+      "import": "./dist/web/vault-client.js"
+    },
+    "./sealedPack": {
+      "types": "./dist/sealedPack.d.ts",
+      "import": "./dist/sealedPack.js"
+    },
+    "./sealedPack.js": {
+      "types": "./dist/sealedPack.d.ts",
+      "import": "./dist/sealedPack.js"
+    },
+    "./r2Client": {
+      "types": "./dist/r2Client.d.ts",
+      "import": "./dist/r2Client.js"
+    },
+    "./r2Client.js": {
+      "types": "./dist/r2Client.d.ts",
+      "import": "./dist/r2Client.js"
+    },
+    "./cloudShare": {
+      "types": "./dist/cloudShare.d.ts",
+      "import": "./dist/cloudShare.js"
+    },
+    "./cloudShare.js": {
+      "types": "./dist/cloudShare.d.ts",
+      "import": "./dist/cloudShare.js"
+    }
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "prepare": "git config core.hooksPath .husky || true"
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
     "@types/node": "26.6.4",
@@ -31,8 +59,23 @@
     "url": "git+https://github.com/iberi22/swal-vault-core.git"
   },
   "files": [
-    "src"
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
   ],
-  "main": "./src/index.ts",
-  "types": "./src/index.ts"
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "e2ee",
+    "webcrypto",
+    "aes-gcm",
+    "shamir",
+    "local-first",
+    "encryption"
+  ]
 }
