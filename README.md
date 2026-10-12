@@ -1,67 +1,233 @@
-# @swal/vault — Core reusable cifrado 100%
+# @swal/vault
 
-Extraído de `apps/gara-g` a `cores/swal-vault` para reuso en todos los forks (gara-g, hosteler-ia, flota, etc).
+Pure WebCrypto end-to-end encrypted (E2EE) storage core with Shamir's Secret Sharing (2-of-3 threshold), AES-256-GCM authenticated encryption with associated data (AEAD), and zero-knowledge cloud synchronization.
 
-## Que resuelve
-- 100% cifrado: Cloudflare solo ve ciphertext+shares+hash, nunca plaintext.
-- Pay-per-use 5%: si usas R2/D1 pagas infra+AI*1.10+5%, si no usas backend 0$ (mesh P2P replica en otros nodos gara-g).
-- 1 camion = 100 camiones mismo precio (no hay fee por vehiculo).
+Built for privacy-first, local-first web applications and edge runtimes.
 
-## Uso en cualquier app
+---
 
-```ts
-import { createSealedPack, unpackSealedPack, R2StorageClient } from '@swal/vault';
+## Overview
 
-// crear
-const payload = new TextEncoder().encode(JSON.stringify({ plate: 'ABC123', km: 50000 }));
-const pack = await createSealedPack(payload, { entity:'vehicle', entityId: rec.id, appId, instanceId, timestamp: Date.now() });
+`@swal/vault` provides cryptographic building blocks and local key custody for modern web applications and cloud edge services. It is designed so that backend storage providers (such as Cloudflare R2, D1, or S3-compatible stores) only ever see ciphertext, authentication tags, and public metadata—never plaintext data or sufficient key material to decrypt it.
 
-// subir: el cliente SOLO acepta packs con <2 shares y sube siempre packWithoutShares.
-// Shares 1 (dispositivo) y 2 (recuperacion) NUNCA salen del cliente; solo el x=3 puede ir a la nube.
-const r2 = new R2StorageClient({ appId, instanceId, r2Binding: env.SWAL_R2 });
-await r2.uploadSealedPack(packWithoutShares(pack));       // pasar el pack completo lanza error E2EE
-await storeCloudShare(shareStore, pack);                  // guarda solo x=3 (CloudShareStore: D1 recomendado)
+### Core Properties
 
-// leer (el pack de R2 no trae shares; combina las que tengas localmente)
-const got = await r2.getSealedPack(pack.content_hash);
-const plain = await unpackSealedPack(got!, [deviceShare, recoveryShare]);
+- **100% End-to-End Encrypted (E2EE):** Data is encrypted on the client device using an ephemeral Data Encryption Key (DEK).
+- **2-of-3 Shamir Secret Sharing:** The DEK is split into three shares over $\text{GF}(257)$. Reconstructing the DEK requires any two shares.
+  - **Share 1 ($x=1$):** Kept strictly on the local device.
+  - **Share 2 ($x=2$):** Recovery share provided to the user upon onboarding.
+  - **Share 3 ($x=3$):** Cloud custody share stored in a database (such as Cloudflare D1).
+- **Zero Cloud Compromise:** Because the cloud backend never holds more than one share ($x=3$), the operator or a compromised cloud infrastructure cannot decrypt user records.
+- **Pure WebCrypto Runtime:** Relies exclusively on standard `globalThis.crypto.subtle` and `Uint8Array`. Zero dependencies on Node.js-specific modules (`node:crypto`, `Buffer`). Runs seamlessly in browsers (PWAs), Cloudflare Workers, Node.js (>= 19), Bun, and Deno.
+- **Tamper-Proof Metadata (AEAD):** In Pack format v2, metadata is authenticated as Additional Authenticated Data (AAD) in AES-GCM. Modifying metadata, ciphertext, IV, or tag causes decryption to fail.
+- **Hardware-Backed Identity & Key Wrapping:** Client module (`@swal/vault/web`) provides non-extractable IndexedDB key custody, passkey PRF support, and PBKDF2-SHA256 key derivation with up to 600,000 iterations.
+
+---
+
+## Installation
+
+```bash
+npm install @swal/vault
+# or
+pnpm add @swal/vault
 ```
 
-Path R2: `packs/{appId}/{instanceId}/{entity}/{content_hash}.json`
-Shares: 2/3 Shamir GF257 reconstruye DEK. x=1 en el dispositivo, x=2 de recuperacion (usuario), x=3 unico share en la nube.
-La nube (R2+D1+KV) nunca debe acumular 2 shares.
+---
 
-### Share de nube: D1 mejor que KV
-`CloudShareStore` (`put/get/delete`) es una interfaz agnostica; hay `MemoryCloudShareStore` para tests. KV cobra 1 escritura
-por registro y la cuenta de Cloudflare tiene **1.000 escrituras KV/dia compartidas por todos los proyectos**; guarda el share x=3 en D1 (100.000 filas/dia).
+## Usage Guide
 
-### Formato y metadatos
-`pack.v = 2`: los metadatos se ligan como AAD de AES-GCM (alterarlos, o el tag/ciphertext, rompe el descifrado). Los metadatos viajan en
-claro; solo se admiten las claves de `CLEAR_METADATA_KEYS` (o `extraClearKeys` explicito en `createSealedPack`). Los packs sin `v` (legado) se siguen leyendo.
-`registerOnPolygon` esta eliminado (lanza `not implemented`): el anclaje real no existe aun.
+### 1. Sealing and Unpacking Data
 
-### Gate local
-`.husky/pre-commit` y `pre-push` ejecutan `vitest run` y `tsc --noEmit` (`pnpm install` activa `core.hooksPath`).
+```ts
+import {
+  createSealedPack,
+  unpackSealedPack,
+  packWithoutShares,
+  packMetadataForEntity,
+} from '@swal/vault';
 
-## Reuso
-- gara-g: vehicle/fleet/telemetry -> sealed
-- hosteler-ia: order/inventoryItem/restaurant -> mismo api
-- flota: maintenance/fuelLog/document -> mismo
+// 1. Prepare plaintext payload and metadata
+const payload = new TextEncoder().encode(JSON.stringify({ secretNote: 'Confidential message' }));
+const metadata = packMetadataForEntity('document', 'doc-123', 'my-app', 'instance-1');
 
-No acopla a econ-sdk: chain defaults polygon 137 si no hay @swal/econ.
+// 2. Create sealed pack (AES-256-GCM + Shamir 2/3 + Ed25519 signature)
+const pack = await createSealedPack(payload, metadata);
 
-## Navegador (PWA) — `@swal/vault/web`
+// pack.shares contains 3 shares:
+// - Share 1 (index: 1): store in device IndexedDB
+// - Share 2 (index: 2): backup/recovery key for user
+// - Share 3 (index: 3): cloud custody share
 
-Todo el paquete usa solo WebCrypto (`globalThis.crypto.subtle`, Node >=19 y navegadores) y `Uint8Array`; sin `node:crypto` ni `Buffer`. Firma de packs: Ed25519 (requiere Chrome 137+/Firefox 129+/Safari 17+ o Node). Cambios de API: `computeContentHash` queda deprecado (usa `computeContentHashAsync`); el par de claves de `createSealedPack` es ahora `CryptoKeyPair` (se siguen aceptando `KeyObject` de node); nuevo `verifySealedPackSignature`.
+// 3. Prepare pack for cloud storage (strips shares)
+const cloudSafePack = packWithoutShares(pack);
+
+// 4. Decrypt payload using any 2 shares
+const deviceShare = pack.shares[0]; // x=1
+const recoveryShare = pack.shares[1]; // x=2
+
+const decryptedBytes = await unpackSealedPack(cloudSafePack, [deviceShare, recoveryShare]);
+const decryptedText = new TextDecoder().decode(decryptedBytes);
+```
+
+### 2. Cloud Storage Boundary (R2 & CloudShareStore)
+
+```ts
+import { R2StorageClient, storeCloudShare, MemoryCloudShareStore } from '@swal/vault';
+
+// Initialize R2 storage client (supports real Cloudflare Worker R2 bucket bindings or in-memory fallback)
+const r2 = new R2StorageClient({
+  appId: 'my-app',
+  instanceId: 'inst-01',
+  r2Binding: env.SWAL_R2, // Cloudflare R2 bucket binding (optional)
+});
+
+// Upload pack: enforce that no more than 1 share is uploaded.
+// uploadSealedPack automatically strips shares and throws an error if >= 2 shares are present.
+await r2.uploadSealedPack(pack);
+
+// Store the single permitted cloud share (x=3) in CloudShareStore (D1 / KV / Memory)
+const shareStore = new MemoryCloudShareStore();
+await storeCloudShare(shareStore, pack);
+
+// Retrieve and decrypt
+const storedPack = await r2.getSealedPack(pack.content_hash);
+const cloudShare = await shareStore.get(pack.id);
+
+if (storedPack && cloudShare) {
+  const plain = await unpackSealedPack(storedPack, [deviceShare, cloudShare]);
+}
+```
+
+### 3. Browser Client (`@swal/vault/web`)
+
+The browser client provides zero-network, local-first key lifecycle management in IndexedDB.
 
 ```ts
 import { createVaultClient } from '@swal/vault/web';
 
-const vault = createVaultClient({ storage: 'idb', dbName: 'mi-app-vault' });
-const id = await vault.getDeviceIdentity();            // ECDSA P-256 no extraible en IndexedDB
-await vault.unlockPreferPasskey('mi passphrase');      // passkey PRF si hay; si no PBKDF2-SHA256 (600k)
-const { raw, key } = await vault.getOrCreateMeshKey(); // 32 bytes + CryptoKey AES-GCM; en reposo siempre envuelta
-const { recoveryShare, cloudShare } = await vault.exportRecoveryShare(); // se muestra UNA vez
+// 1. Initialize client with IndexedDB backing
+const vault = createVaultClient({
+  storage: 'idb',
+  dbName: 'app-vault-storage',
+  pbkdf2Iterations: 600_000, // minimum allowed is 310,000
+});
+
+// 2. Hardware / device identity (non-extractable ECDSA P-256)
+const identity = await vault.getDeviceIdentity();
+
+// 3. Unlock KEK via Passkey PRF (WebAuthn) or passphrase
+await vault.unlockPreferPasskey('user-strong-passphrase');
+
+// 4. Retrieve or generate the mesh encryption key (wrapped at rest in IndexedDB)
+const { raw, key } = await vault.getOrCreateMeshKey();
+
+// 5. Export recovery shares (allowed only ONCE; subsequent calls throw SHARE_ALREADY_SHOWN)
+const { recoveryShare, cloudShare } = await vault.exportRecoveryShare();
+
+// 6. Emergency recovery / passphrase reset using recovery share
+await vault.resetPassphrase(recoveryShare, 'new-strong-passphrase');
 ```
 
-Nunca hace peticiones de red. Share 1 queda en el dispositivo, share 2 (recuperacion) se entrega al usuario, share 3 es de custodia opcional; con menos de 2 shares no se reconstruye nada. `resetPassphrase(recoveryShare, nueva)` recupera la meshKey si se olvida la passphrase.
+---
+
+## API Reference
+
+### Core (`@swal/vault`)
+
+#### `createSealedPack(payload, metadata, keyPair?, options?)`
+Encrypts `payload` with a freshly generated 32-byte AES-GCM DEK, splits the DEK into 3 Shamir shares, computes a SHA-256 content hash over ciphertext and metadata, signs the hash using Ed25519, and binds metadata into the AES-GCM tag via AAD.
+- `payload`: `Uint8Array` of data to encrypt.
+- `metadata`: `SealedPackMetadata` object. Keys must be whitelisted unless specified in `options.extraClearKeys`.
+- `keyPair`: Optional Ed25519 `CryptoKeyPair` (or Node-compatible `KeyObject` pair). A key pair is generated if omitted.
+- `options.extraClearKeys`: Optional array of string keys permitted in plaintext metadata.
+- Returns: `Promise<SealedPack>`.
+
+#### `unpackSealedPack(pack, shares)`
+Reconstructs the 32-byte DEK from any two valid `DEKShare` objects, verifies the AAD and authentication tag, and decrypts the ciphertext.
+- `pack`: `SealedPack`.
+- `shares`: `DEKShare[]` containing at least 2 distinct shares.
+- Returns: `Promise<Uint8Array>`.
+
+#### `packWithoutShares(pack)`
+Returns a shallow copy of `pack` with `shares: []`. Safe for transmitting to cloud backends.
+
+#### `splitDEK(dek)` / `reconstructDEK(shares)`
+Low-level Shamir Secret Sharing implementation over $\text{GF}(257)$.
+- `splitDEK(dek: Uint8Array)`: Returns an array of 3 `DEKShare` objects ($x \in \{1, 2, 3\}$).
+- `reconstructDEK(shares: DEKShare[])`: Takes 2 distinct shares and returns the original 32-byte DEK.
+
+#### `verifySealedPackHash(pack)`
+Asynchronously validates that the pack's `content_hash` matches `SHA-256(ciphertext || sorted(metadata))`. Returns `Promise<boolean>`.
+
+#### `verifySealedPackSignature(pack)`
+Verifies the Ed25519 signature over `content_hash` using the embedded `publicKey`. Returns `Promise<boolean>`.
+
+#### `R2StorageClient`
+Storage client adapter for Cloudflare R2 / S3 storage:
+- `uploadSealedPack(pack)`: Verifies integrity, strips shares, and stores pack under `packs/{appId}/{instanceId}/{entity}/{content_hash}.json`. Throws if pack contains $\ge 2$ shares.
+- `getSealedPack(keyOrHash)`: Fetches pack from R2 or fallback memory store.
+- `deleteSealedPack(keyOrHash)`: Deletes pack from storage.
+- `listSealedPacks(prefix?)`: Lists stored pack keys.
+
+#### `CloudShareStore` & `storeCloudShare(store, pack)`
+- `CloudShareStore`: Abstract storage interface (`put`, `get`, `delete`) for cloud-persisted shares ($x=3$).
+- `storeCloudShare(store, pack)`: Extracts share $x=3$ and persists it. Rejects any operation that would store shares with index $\ne 3$.
+- `MemoryCloudShareStore`: In-memory reference implementation for testing and mesh node synchronization.
+
+---
+
+### Web (`@swal/vault/web`)
+
+#### `createVaultClient(options)`
+Creates a browser vault manager backed by IndexedDB.
+- `options.storage`: Currently `'idb'` is supported.
+- `options.dbName`: IndexedDB database name (default: `'swal-vault'`).
+- `options.pbkdf2Iterations`: PBKDF2 iterations for passphrase derivation (default: `600_000`, minimum: `310_000`).
+- `options.passkey`: Optional WebAuthn PRF provider implementation.
+
+#### `VaultClient` Methods
+- `getDeviceIdentity(): Promise<DeviceIdentity>`: Returns device ID and SPKI/JWK public keys.
+- `sign(data: Uint8Array): Promise<Uint8Array>`: Signs data with device private key.
+- `verify(publicKeyJwk, data, signature): Promise<boolean>`: Verifies device signature.
+- `unlock(options): Promise<void>`: Unlocks memory KEK using `{ passphrase: string }` or `{ passkey: true }`.
+- `unlockPreferPasskey(passphrase): Promise<'passkey' | 'passphrase'>`: Attempts passkey unlock with automatic passphrase fallback.
+- `lock(): void`: Wipes in-memory KEK.
+- `isUnlocked(): boolean`: Returns current unlock state.
+- `getOrCreateMeshKey(): Promise<MeshKey>`: Returns the active wrapped 32-byte mesh key.
+- `exportRecoveryShare(): Promise<{ recoveryShare: DEKShare, cloudShare: DEKShare }>`: Exports recovery and cloud shares. Allowed only once.
+- `recoverMeshKey(recoveryShare: DEKShare): Promise<Uint8Array>`: Reconstructs mesh key using device share and recovery share.
+- `resetPassphrase(recoveryShare: DEKShare, newPassphrase: string): Promise<void>`: Re-wraps mesh key under a new passphrase.
+
+---
+
+## Security Notes
+
+1. **Threshold Secrecy:** Shamir secret sharing over $\text{GF}(257)$ provides information-theoretic security for the threshold: any single share ($k=1$) reveals zero information about the underlying encryption key.
+2. **Cloud Boundary Invariant:** At no point should any single backend service accumulate 2 or more shares. Cloud storage (R2/S3) must only receive packs stripped of shares (`packWithoutShares`). Cloud databases (such as Cloudflare D1) must only ever store share $x=3$. Both `uploadSealedPack` and `storeCloudShare` enforce this programmatically (`assertCloudSharesSafe`).
+3. **AEAD Authentication:** Pack format v2 binds metadata directly into AES-GCM via AAD (`swal-vault/v2|...`). Any alteration to ciphertext, initialization vector, authentication tag, or metadata properties will fail decryption.
+4. **Clear Metadata Whitelist:** To prevent accidental data leaks in plaintext metadata fields, `createSealedPack` enforces a strict whitelist (`CLEAR_METADATA_KEYS`: `vehicleId`, `entityId`, `entity`, `appId`, `instanceId`, `timestamp`, `recordCount`, `deviceId`). Custom fields require explicit opt-in via `extraClearKeys`.
+5. **Key Derivation Standards:** PBKDF2-SHA256 derivation requires a minimum of 310,000 iterations (OWASP recommendation) and defaults to 600,000 iterations. Initializing `VaultClient` with fewer than 310,000 iterations throws a `VaultError`.
+6. **Zero Client Network Leakage:** `createVaultClient` performs zero network requests. All private and secret keys remain securely confined to memory and encrypted IndexedDB storage.
+
+---
+
+## Development & Gate
+
+Run tests and typecheck verification:
+
+```bash
+# Run test suite
+npx vitest run
+
+# Run TypeScript check
+npx tsc --noEmit
+
+# Verify package tarball contents
+npm pack --dry-run
+```
+
+---
+
+## License
+
+[Apache-2.0](LICENSE) © 2026 SouthWest AI Labs (SWAL)
