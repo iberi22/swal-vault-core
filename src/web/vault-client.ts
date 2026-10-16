@@ -78,6 +78,15 @@ export interface VaultClient {
   exportRecoveryShare(): Promise<{ recoveryShare: DEKShare; cloudShare: DEKShare }>;
   /** Reconstruye la meshKey con el share de recuperacion + el share del dispositivo. */
   recoverMeshKey(recoveryShare: DEKShare): Promise<Uint8Array>;
+  /**
+   * Reconstruye la meshKey sin el dispositivo, a partir de dos de los tres shares.
+   * No requiere desbloquear el vault.
+   */
+  recoverMeshKeyFromShares(a: DEKShare, b: DEKShare): Promise<Uint8Array>;
+  /**
+   * Importa o reemplaza la meshKey.
+   */
+  importMeshKey(raw: Uint8Array, opts?: { replace?: boolean }): Promise<void>;
   /** Recupera la meshKey y la re-envuelve con una nueva passphrase. */
   resetPassphrase(recoveryShare: DEKShare, newPassphrase: string): Promise<void>;
 }
@@ -214,6 +223,9 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
   const put = async (k: string, v: unknown): Promise<void> => {
     await tx(await db(), 'readwrite', (s) => s.put(v, k));
   };
+  const del = async (k: string): Promise<void> => {
+    await tx(await db(), 'readwrite', (s) => s.delete(k));
+  };
 
   const passkey = opts.passkey ?? defaultPasskeyProvider({ get, put }, opts.rpId);
 
@@ -333,6 +345,35 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       const device = await get<DEKShare>('deviceShare');
       if (!device) throw new VaultError('NO_MESH_KEY', 'no hay share de dispositivo');
       return reconstructDEK([device, recoveryShare]);
+    },
+
+    async recoverMeshKeyFromShares(a, b) {
+      if (!Number.isInteger(a.index) || !Number.isInteger(b.index) || a.index < 1 || a.index > 3 || b.index < 1 || b.index > 3) {
+        throw new VaultError('BAD_PARAMS', 'los indices de los shares deben ser enteros entre 1 y 3');
+      }
+      if (a.index === b.index) {
+        throw new VaultError('BAD_PARAMS', 'los indices de los shares deben ser diferentes');
+      }
+      try {
+        return reconstructDEK([a, b]);
+      } catch {
+        throw new VaultError('BAD_FORMAT', 'formato de share invalido al reconstruir la clave');
+      }
+    },
+
+    async importMeshKey(raw, opts) {
+      const k = needKek();
+      if (raw.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes para la meshKey');
+      const existing = await get<string>('meshKeyWrapped');
+      if (existing && !opts?.replace) {
+        throw new VaultError('BAD_PARAMS', 'ya existe una clave y replace no es verdadero');
+      }
+      const wrapped = await wrapWith(raw, k);
+      await put('meshKeyWrapped', wrapped);
+      if (opts?.replace) {
+        await del('deviceShare');
+        await del('recoveryShown');
+      }
     },
 
     async resetPassphrase(recoveryShare, newPassphrase) {
