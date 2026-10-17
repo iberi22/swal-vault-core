@@ -226,6 +226,22 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
   const del = async (k: string): Promise<void> => {
     await tx(await db(), 'readwrite', (s) => s.delete(k));
   };
+  const importMeshKeyTx = (wrapped: string, replace: boolean): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      db().then((dbInstance) => {
+        const t = dbInstance.transaction(STORE, 'readwrite');
+        const s = t.objectStore(STORE);
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+        t.onabort = () => reject(t.error);
+        s.put(wrapped, 'meshKeyWrapped');
+        if (replace) {
+          s.delete('deviceShare');
+          s.delete('recoveryShown');
+        }
+      }).catch(reject);
+    });
+  };
 
   const passkey = opts.passkey ?? defaultPasskeyProvider({ get, put }, opts.rpId);
 
@@ -348,6 +364,10 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
 
     async recoverMeshKeyFromShares(a, b) {
+      needKek();
+      if (!a || !b || typeof a.value !== 'string' || typeof b.value !== 'string') {
+        throw new VaultError('BAD_FORMAT', 'los shares deben contener un valor string');
+      }
       if (!Number.isInteger(a.index) || !Number.isInteger(b.index) || a.index < 1 || a.index > 3 || b.index < 1 || b.index > 3) {
         throw new VaultError('BAD_PARAMS', 'los indices de los shares deben ser enteros entre 1 y 3');
       }
@@ -363,17 +383,14 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
 
     async importMeshKey(raw, opts) {
       const k = needKek();
+      if (!(raw instanceof Uint8Array)) throw new VaultError('BAD_FORMAT', 'raw debe ser Uint8Array');
       if (raw.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes para la meshKey');
       const existing = await get<string>('meshKeyWrapped');
       if (existing && !opts?.replace) {
         throw new VaultError('BAD_PARAMS', 'ya existe una clave y replace no es verdadero');
       }
       const wrapped = await wrapWith(raw, k);
-      await put('meshKeyWrapped', wrapped);
-      if (opts?.replace) {
-        await del('deviceShare');
-        await del('recoveryShown');
-      }
+      await importMeshKeyTx(wrapped, !!opts?.replace);
     },
 
     async resetPassphrase(recoveryShare, newPassphrase) {
