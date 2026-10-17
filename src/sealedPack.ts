@@ -15,7 +15,7 @@ const _econChain = 'polygon';
 const _econChainId = 137;
 
 /** Version de formato del pack. Ausente = legado (sin AAD). 2 = metadatos ligados como AAD de AES-GCM. */
-export const PACK_VERSION = 2;
+export const PACK_VERSION = 3;
 
 /**
  * Lista blanca de metadatos que pueden viajar EN CLARO junto al pack. Todo lo que no este aqui
@@ -77,7 +77,31 @@ function modInverse257(n: number): number {
   return res;
 }
 
-export function splitDEK(dek: Uint8Array): DEKShare[] {
+
+const exp256 = new Uint8Array(256);
+const log256 = new Uint8Array(256);
+let _x256 = 1;
+for (let i = 0; i < 255; i++) {
+  exp256[i] = _x256;
+  log256[_x256] = i;
+  let x2 = _x256 << 1;
+  if (x2 & 0x100) x2 ^= 0x11b;
+  _x256 = x2 ^ _x256;
+}
+
+function mul256(a: number, b: number): number {
+  if (a === 0 || b === 0) return 0;
+  return exp256[(log256[a] + log256[b]) % 255];
+}
+function inv256(a: number): number {
+  if (a === 0) throw new Error('Division by zero GF256');
+  return exp256[(255 - log256[a]) % 255];
+}
+
+export function splitDEK(dek: Uint8Array, version: number = 3): DEKShare[] {
+  if (version !== 2 && version !== 3) {
+    throw new Error(`Unsupported splitDEK version: ${version}`);
+  }
   if (dek.length !== 32) throw new Error('DEK 32 bytes');
   const s1 = new Uint8Array(32);
   const s2 = new Uint8Array(32);
@@ -85,12 +109,19 @@ export function splitDEK(dek: Uint8Array): DEKShare[] {
   for (let i = 0; i < 32; i++) {
     const secret = dek[i];
     let a1: number, y1: number, y2: number, y3: number;
-    do {
-      a1 = randomInt(1, 257);
-      y1 = mod257(secret + a1 * 1);
-      y2 = mod257(secret + a1 * 2);
-      y3 = mod257(secret + a1 * 3);
-    } while (y1 === 256 || y2 === 256 || y3 === 256);
+    if (version === 2) {
+      do {
+        a1 = randomInt(1, 257);
+        y1 = mod257(secret + a1 * 1);
+        y2 = mod257(secret + a1 * 2);
+        y3 = mod257(secret + a1 * 3);
+      } while (y1 === 256 || y2 === 256 || y3 === 256);
+    } else {
+      a1 = randomInt(0, 256);
+      y1 = secret ^ mul256(a1, 1);
+      y2 = secret ^ mul256(a1, 2);
+      y3 = secret ^ mul256(a1, 3);
+    }
     s1[i] = y1;
     s2[i] = y2;
     s3[i] = y3;
@@ -102,7 +133,10 @@ export function splitDEK(dek: Uint8Array): DEKShare[] {
   ];
 }
 
-export function reconstructDEK(shares: DEKShare[]): Uint8Array {
+export function reconstructDEK(shares: DEKShare[], version: number = 3): Uint8Array {
+  if (version !== 2 && version !== 3) {
+    throw new Error(`Version de pack no soportada: ${version}`);
+  }
   if (shares.length < 2) throw new Error('At least 2 shares are required to reconstruct DEK');
   const s1 = shares[0], s2 = shares[1];
   const x1 = s1.index, x2 = s2.index;
@@ -110,10 +144,16 @@ export function reconstructDEK(shares: DEKShare[]): Uint8Array {
   const y1 = fromBase64(s1.value);
   const y2 = fromBase64(s2.value);
   if (y1.length !== 32 || y2.length !== 32) throw new Error('share length 32');
-  const num1 = mod257(-x2), den1 = mod257(x1 - x2), L1 = mod257(num1 * modInverse257(den1));
-  const num2 = mod257(-x1), den2 = mod257(x2 - x1), L2 = mod257(num2 * modInverse257(den2));
   const dek = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) dek[i] = mod257(y1[i] * L1 + y2[i] * L2);
+  if (version === 2) {
+    const num1 = mod257(-x2), den1 = mod257(x1 - x2), L1 = mod257(num1 * modInverse257(den1));
+    const num2 = mod257(-x1), den2 = mod257(x2 - x1), L2 = mod257(num2 * modInverse257(den2));
+    for (let i = 0; i < 32; i++) dek[i] = mod257(y1[i] * L1 + y2[i] * L2);
+  } else {
+    const L1 = mul256(x2, inv256(x1 ^ x2));
+    const L2 = mul256(x1, inv256(x1 ^ x2));
+    for (let i = 0; i < 32; i++) dek[i] = mul256(y1[i], L1) ^ mul256(y2[i], L2);
+  }
   return dek;
 }
 
@@ -128,8 +168,8 @@ function canonicalJson(v: unknown): string {
 }
 
 /** AAD de AES-GCM (v2): los metadatos quedan autenticados; alterarlos rompe el descifrado. */
-function metadataAad(metadata: SealedPackMetadata): Uint8Array {
-  return utf8(`swal-vault/v${PACK_VERSION}|${canonicalJson(metadata)}`);
+function metadataAad(metadata: SealedPackMetadata, version: number): Uint8Array {
+  return utf8(`swal-vault/v${version}|${canonicalJson(metadata)}`);
 }
 
 function assertMetadataWhitelisted(metadata: SealedPackMetadata, extra: readonly string[]): void {
@@ -236,11 +276,11 @@ export async function createSealedPack(
   const iv = randomBytes(12);
   // WebCrypto devuelve ciphertext||tag(16); se separan para mantener el formato del pack.
   const sealed = new Uint8Array(
-    await subtle().encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128, additionalData: bs(metadataAad(metadata)) }, await aesKey(dek, 'encrypt'), bs(payload)),
+    await subtle().encrypt({ name: 'AES-GCM', iv: bs(iv), tagLength: 128, additionalData: bs(metadataAad(metadata, PACK_VERSION)) }, await aesKey(dek, 'encrypt'), bs(payload)),
   );
   const ct = sealed.subarray(0, sealed.length - 16);
   const tag = sealed.subarray(sealed.length - 16);
-  const shares = splitDEK(dek);
+  const shares = splitDEK(dek, PACK_VERSION);
   const contentHash = await computeContentHashAsync(ct, metadata);
   const { priv, pubSpki } = await resolveKeyPair(keyPair);
   const sig = new Uint8Array(await subtle().sign({ name: 'Ed25519' }, priv, bs(utf8(contentHash))));
@@ -261,14 +301,14 @@ export async function createSealedPack(
 }
 
 export async function unpackSealedPack(pack: SealedPack, shares: DEKShare[]): Promise<Uint8Array> {
-  const dek = reconstructDEK(shares);
+  const dek = reconstructDEK(shares, pack.v ?? 2);
   const ct = fromBase64(pack.ciphertext);
   const iv = fromBase64(pack.iv);
   const tag = fromBase64(pack.tag);
   if (pack.v !== undefined && pack.v !== PACK_VERSION) throw new Error(`Version de pack no soportada: ${pack.v}`);
   // Legado (sin `v`): sin AAD. Un pack v2 al que se le quita `v` falla por tag al no coincidir el AAD.
   const params: AesGcmParams = { name: 'AES-GCM', iv: bs(iv), tagLength: 128 };
-  if (pack.v === PACK_VERSION) params.additionalData = bs(metadataAad(pack.metadata));
+  if (pack.v === PACK_VERSION) params.additionalData = bs(metadataAad(pack.metadata, pack.v!));
   const dec = await subtle().decrypt(
     params,
     await aesKey(dek, 'decrypt'),
