@@ -74,8 +74,10 @@ export interface VaultClient {
   unwrapKey(wrapped: string, kek?: CryptoKey): Promise<Uint8Array>;
 
   getOrCreateMeshKey(): Promise<MeshKey>;
+  rotateMeshKey(): Promise<{ raw: Uint8Array; epoch: number }>;
+  getEpoch(): Promise<number>;
   /** Devuelve el share de recuperacion (x=2) UNA sola vez; luego lanza SHARE_ALREADY_SHOWN. */
-  exportRecoveryShare(): Promise<{ recoveryShare: DEKShare; cloudShare: DEKShare }>;
+  exportRecoveryShare(opts?: { reissue?: boolean }): Promise<{ recoveryShare: DEKShare; cloudShare: DEKShare }>;
   /** Reconstruye la meshKey con el share de recuperacion + el share del dispositivo. */
   recoverMeshKey(recoveryShare: DEKShare): Promise<Uint8Array>;
   /**
@@ -222,6 +224,9 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
   const put = async (k: string, v: unknown): Promise<void> => {
     await tx(await db(), 'readwrite', (s) => s.put(v, k));
   };
+  const del = async (k: string): Promise<void> => {
+    await tx(await db(), 'readwrite', (s) => s.delete(k));
+  };
 
   const passkey = opts.passkey ?? defaultPasskeyProvider({ get, put }, opts.rpId);
 
@@ -318,6 +323,24 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
     unwrapKey: (wrapped, k) => unwrapWith(wrapped, needKek(k)),
 
+    async getEpoch() {
+      return (await get<number>('epoch')) ?? 0;
+    },
+
+    async rotateMeshKey() {
+      const k = needKek();
+      const raw = randomBytes(32);
+      const wrapped = await wrapWith(raw, k);
+      const epoch = (await self.getEpoch()) + 1;
+
+      await put('meshKeyWrapped', wrapped);
+      await put('epoch', epoch);
+      await put('recoveryShown', false);
+      await del('deviceShare');
+
+      return { raw, epoch };
+    },
+
     async getOrCreateMeshKey() {
       const k = needKek();
       const wrapped = await get<string>('meshKeyWrapped');
@@ -327,9 +350,13 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       return toMeshKey(raw);
     },
 
-    async exportRecoveryShare() {
+    async exportRecoveryShare(opts) {
+      const reissue = opts?.reissue ?? false;
+      if (reissue) {
+        needKek();
+      }
       const { raw } = await self.getOrCreateMeshKey();
-      if (await get<boolean>('recoveryShown'))
+      if (!reissue && await get<boolean>('recoveryShown'))
         throw new VaultError('SHARE_ALREADY_SHOWN', 'el share de recuperacion ya se mostro y no puede repetirse');
       const [device, recoveryShare, cloudShare] = splitDEK(raw);
       await put('deviceShare', device); // un solo share no revela nada (umbral 2)
