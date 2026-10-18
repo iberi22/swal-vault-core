@@ -76,7 +76,7 @@ export interface VaultClient {
   getOrCreateMeshKey(): Promise<MeshKey>;
   rotateMeshKey(): Promise<{ raw: Uint8Array; epoch: number }>;
   getEpoch(): Promise<number>;
-  /** Devuelve el share de recuperacion (x=2) UNA sola vez; luego lanza SHARE_ALREADY_SHOWN. */
+  /** Devuelve el share de recuperacion (x=2) UNA sola vez, salvo que se use reissue: true; luego lanza SHARE_ALREADY_SHOWN. */
   exportRecoveryShare(opts?: { reissue?: boolean }): Promise<{ recoveryShare: DEKShare; cloudShare: DEKShare }>;
   /** Reconstruye la meshKey con el share de recuperacion + el share del dispositivo. */
   recoverMeshKey(recoveryShare: DEKShare): Promise<Uint8Array>;
@@ -331,14 +331,29 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       const k = needKek();
       const raw = randomBytes(32);
       const wrapped = await wrapWith(raw, k);
-      const epoch = (await self.getEpoch()) + 1;
 
-      await put('meshKeyWrapped', wrapped);
-      await put('epoch', epoch);
-      await put('recoveryShown', false);
-      await del('deviceShare');
+      return new Promise((resolve, reject) => {
+        db().then((dbInstance) => {
+          const t = dbInstance.transaction(STORE, 'readwrite');
+          const s = t.objectStore(STORE);
+          t.onerror = () => reject(t.error);
+          t.onabort = () => reject(t.error);
 
-      return { raw, epoch };
+          const getEpochReq = s.get('epoch');
+          getEpochReq.onsuccess = () => {
+            const epoch = (getEpochReq.result || 0) + 1;
+            s.put(wrapped, 'meshKeyWrapped');
+            s.put(epoch, 'epoch');
+            s.put(false, 'recoveryShown');
+            s.delete('deviceShare');
+            t.oncomplete = () => resolve({ raw, epoch });
+          };
+          getEpochReq.onerror = () => {
+            t.abort();
+            reject(getEpochReq.error);
+          };
+        }).catch(reject);
+      });
     },
 
     async getOrCreateMeshKey() {
@@ -355,13 +370,65 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       if (reissue) {
         needKek();
       }
-      const { raw } = await self.getOrCreateMeshKey();
-      if (!reissue && await get<boolean>('recoveryShown'))
-        throw new VaultError('SHARE_ALREADY_SHOWN', 'el share de recuperacion ya se mostro y no puede repetirse');
+      // Must read wrapped first, then split the exact key that we checked against.
+      // We get both to ensure the raw key we split is derived from the exact wrapped string we assert on.
+      const k = needKek();
+      let wrappedRef = await get<string>('meshKeyWrapped');
+      if (!wrappedRef) {
+        await self.getOrCreateMeshKey();
+        wrappedRef = (await get<string>('meshKeyWrapped'))!;
+      }
+      // Unwrap directly so we KNOW these raw bytes belong to this specific wrapped string
+      const raw = await unwrapWith(wrappedRef, k);
       const [device, recoveryShare, cloudShare] = splitDEK(raw);
-      await put('deviceShare', device); // un solo share no revela nada (umbral 2)
-      await put('recoveryShown', true);
-      return { recoveryShare, cloudShare };
+
+      return new Promise((resolve, reject) => {
+        db().then((dbInstance) => {
+          const t = dbInstance.transaction(STORE, 'readwrite');
+          const s = t.objectStore(STORE);
+          t.onerror = () => reject(t.error);
+          t.onabort = () => reject(t.error);
+
+          const getWrappedReq = s.get('meshKeyWrapped');
+          getWrappedReq.onsuccess = () => {
+            // If the key changed during the export logic, abort to prevent writing a stale deviceShare.
+            if (getWrappedReq.result !== wrappedRef) {
+              t.abort();
+              reject(new VaultError('BAD_KEY', 'la clave cambio durante la exportacion'));
+              return;
+            }
+            // For race condition handling, if rotation finished *before* we read, then
+            // wrappedRef already captures the rotated key and we are safe.
+            // If rotation finishes *after* we evaluate the above condition but *before* we put the share,
+            // the IndexedDB readwrite transaction serialization guarantees we hold the store.
+            if (!reissue) {
+              const getShownReq = s.get('recoveryShown');
+              getShownReq.onsuccess = () => {
+                if (getShownReq.result) {
+                  t.abort();
+                  reject(new VaultError('SHARE_ALREADY_SHOWN', 'el share de recuperacion ya se mostro y no puede repetirse'));
+                  return;
+                }
+                s.put(device, 'deviceShare');
+                s.put(true, 'recoveryShown');
+                t.oncomplete = () => resolve({ recoveryShare, cloudShare });
+              };
+              getShownReq.onerror = () => {
+                t.abort();
+                reject(getShownReq.error);
+              };
+            } else {
+              s.put(device, 'deviceShare');
+              s.put(true, 'recoveryShown');
+              t.oncomplete = () => resolve({ recoveryShare, cloudShare });
+            }
+          };
+          getWrappedReq.onerror = () => {
+            t.abort();
+            reject(getWrappedReq.error);
+          };
+        }).catch(reject);
+      });
     },
 
     async recoverMeshKey(recoveryShare) {
@@ -413,6 +480,10 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
             if (opts?.replace) {
               s.delete('deviceShare');
               s.delete('recoveryShown');
+              const epochReq = s.get('epoch');
+              epochReq.onsuccess = () => {
+                s.put((epochReq.result || 0) + 1, 'epoch');
+              };
             }
           };
           getReq.onerror = () => {

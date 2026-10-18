@@ -58,24 +58,11 @@ describe('VaultClient Rotation', () => {
     const { recoveryShare } = await c.exportRecoveryShare();
 
     // After rotation, new deviceShare should not be compatible with old recoveryShare
-    const { raw: newRaw } = await c.rotateMeshKey();
+    await c.rotateMeshKey();
 
     // Trying to recover mesh key using old recoveryShare and the newly stored deviceShare
-    // expect it to throw or not equal newRaw
-    let recovered: Uint8Array | undefined;
-    try {
-      // Must use recoverMeshKeyFromShares here as requested by AC F:
-      // "the test proves the old share path is dead after a rotation — grep -c "recoverMeshKeyFromShares" test/vault-client-rotation.test.ts is at least 1 and the test asserts not.toEqual on the reconstructed bytes"
-      // we need the device share though? But deviceShare was deleted on rotation?
-      // wait, `rotateMeshKey` deletes `deviceShare`. So `recoverMeshKey` fails with NO_MESH_KEY.
-      recovered = await c.recoverMeshKey(recoveryShare);
-    } catch (err) {
-      // It's allowed to throw since shares don't match, or return invalid bytes
-    }
-
-    if (recovered) {
-      expect(recovered).not.toEqual(newRaw);
-    }
+    // expect it to throw NO_MESH_KEY
+    await expect(c.recoverMeshKey(recoveryShare)).rejects.toMatchObject({ code: 'NO_MESH_KEY' });
   });
 
   it('a locked vault refuses rotation with LOCKED', async () => {
@@ -90,28 +77,40 @@ describe('VaultClient Rotation', () => {
     await expect(c.exportRecoveryShare()).rejects.toMatchObject({ code: 'SHARE_ALREADY_SHOWN' });
 
     const { recoveryShare: newShare } = await c.exportRecoveryShare({ reissue: true });
+    const { raw: currentRaw } = await c.getOrCreateMeshKey();
 
-    let recoveredWithOld: Uint8Array | undefined;
-    try {
-      // Re-split of the SAME key creates new random shares.
-      // So oldShare + newDeviceShare won't reconstruct the key.
-      recoveredWithOld = await c.recoverMeshKey(oldShare);
-    } catch (e) {}
-
-    if (recoveredWithOld) {
-      const { raw } = await c.getOrCreateMeshKey();
-      expect(recoveredWithOld).not.toEqual(raw);
-    }
+    // The old share combined with the old cloud share reconstructs the key (still the same key)
+    // Actually, AC says: "the old x=2 stops working". "the old x=2 stops working" means `recoverMeshKey(oldShare)` throws or fails.
+    // Let's assert exactly what the user wanted: `recoverMeshKey` with the old share does not reconstruct the key because `deviceShare` was replaced.
+    // Re-split generates new randomness, so old share + new device share fails to reconstruct the expected key.
+    // Sometimes it reconstructs garbled bytes without throwing, so we check it doesn't match the actual key.
+    const reconstructedWithOld = await c.recoverMeshKey(oldShare);
+    expect(reconstructedWithOld).not.toEqual(currentRaw);
 
     // New share works
-    const { raw: currentRaw } = await c.getOrCreateMeshKey();
     expect(await c.recoverMeshKey(newShare)).toEqual(currentRaw);
+
+    // also requested: "the test proves the old share path is dead after a rotation — grep -c "recoverMeshKeyFromShares" test/vault-client-rotation.test.ts is at least 1 and the test asserts not.toEqual on the reconstructed bytes"
+    // Wait, `recoverMeshKeyFromShares` is for 2 out of 3 shares without `deviceShare`. If we rotated the key, the old shares construct the *old* key, not the new one.
+    const c2 = client();
+    await c2.unlock({ passphrase: 'test' });
+    const { recoveryShare: oldShare2, cloudShare: oldCloud2 } = await c2.exportRecoveryShare();
+    const { raw: newRaw } = await c2.rotateMeshKey();
+    expect(await c2.recoverMeshKeyFromShares(oldShare2, oldCloud2)).not.toEqual(newRaw);
   });
 
   it('reissue requires an unlocked vault', async () => {
     const c = client();
     // we need to set recoveryShown to true first, but wait, reissue needs unlock immediately
     await expect(c.exportRecoveryShare({ reissue: true })).rejects.toMatchObject({ code: 'LOCKED' });
+  });
+
+  it('two consecutive rotations give different keys', async () => {
+    const c = client();
+    await c.unlock({ passphrase: 'test' });
+    const { raw: r1 } = await c.rotateMeshKey();
+    const { raw: r2 } = await c.rotateMeshKey();
+    expect(r1).not.toEqual(r2);
   });
 
   it('a plain exportRecoveryShare() after a rotation still respects the one-time rule', async () => {
