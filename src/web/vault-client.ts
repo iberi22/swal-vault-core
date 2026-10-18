@@ -78,6 +78,14 @@ export interface VaultClient {
   exportRecoveryShare(): Promise<{ recoveryShare: DEKShare; cloudShare: DEKShare }>;
   /** Reconstruye la meshKey con el share de recuperacion + el share del dispositivo. */
   recoverMeshKey(recoveryShare: DEKShare): Promise<Uint8Array>;
+  /**
+   * Reconstruye la meshKey sin el dispositivo, a partir de dos de los tres shares.
+   */
+  recoverMeshKeyFromShares(a: DEKShare, b: DEKShare): Promise<Uint8Array>;
+  /**
+   * Importa o reemplaza la meshKey.
+   */
+  importMeshKey(raw: Uint8Array, opts?: { replace?: boolean }): Promise<void>;
   /** Recupera la meshKey y la re-envuelve con una nueva passphrase. */
   resetPassphrase(recoveryShare: DEKShare, newPassphrase: string): Promise<void>;
 }
@@ -333,6 +341,59 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       const device = await get<DEKShare>('deviceShare');
       if (!device) throw new VaultError('NO_MESH_KEY', 'no hay share de dispositivo');
       return reconstructDEK([device, recoveryShare]);
+    },
+
+    async recoverMeshKeyFromShares(a, b) {
+      needKek();
+      if (!a || !b || typeof a.value !== 'string' || typeof b.value !== 'string') {
+        throw new VaultError('BAD_FORMAT', 'los shares deben contener un valor string');
+      }
+      if (!Number.isInteger(a.index) || !Number.isInteger(b.index) || a.index < 1 || a.index > 3 || b.index < 1 || b.index > 3) {
+        throw new VaultError('BAD_PARAMS', 'los indices de los shares deben ser enteros entre 1 y 3');
+      }
+      if (a.index === b.index) {
+        throw new VaultError('BAD_PARAMS', 'los indices de los shares deben ser diferentes');
+      }
+      try {
+        return reconstructDEK([a, b]);
+      } catch {
+        throw new VaultError('BAD_FORMAT', 'formato de share invalido al reconstruir la clave');
+      }
+    },
+
+    async importMeshKey(raw, opts) {
+      const k = needKek();
+      if (!(raw instanceof Uint8Array)) throw new VaultError('BAD_PARAMS', 'raw debe ser Uint8Array');
+      if (raw.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes para la meshKey');
+      const wrapped = await wrapWith(raw, k);
+
+      return new Promise((resolve, reject) => {
+        db().then((dbInstance) => {
+          const t = dbInstance.transaction(STORE, 'readwrite');
+          const s = t.objectStore(STORE);
+          t.oncomplete = () => resolve();
+          t.onerror = () => reject(t.error);
+          t.onabort = () => reject(t.error);
+
+          const getReq = s.get('meshKeyWrapped');
+          getReq.onsuccess = () => {
+            if (getReq.result && !opts?.replace) {
+              t.abort();
+              reject(new VaultError('BAD_PARAMS', 'ya existe una clave y replace no es verdadero'));
+              return;
+            }
+            s.put(wrapped, 'meshKeyWrapped');
+            if (opts?.replace) {
+              s.delete('deviceShare');
+              s.delete('recoveryShown');
+            }
+          };
+          getReq.onerror = () => {
+            t.abort();
+            reject(getReq.error);
+          };
+        }).catch(reject);
+      });
     },
 
     async resetPassphrase(recoveryShare, newPassphrase) {
