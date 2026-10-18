@@ -112,93 +112,35 @@ describe('VaultClient recovery', () => {
     await expect(c1.recoverMeshKey(recoveryShare)).rejects.toMatchObject({ code: 'NO_MESH_KEY' });
   });
 
-  it('importMeshKey atomicity simulated failure leaves no mixed state', async () => {
-    // We inject a fake transaction abort midway through importMeshKey implementation
-    const dbName = 'db_atomic';
-    const cAtomic = getClient(dbName);
-    await cAtomic.unlock({ passphrase: 'test' });
+  const rawDB = (db: string, k: string) => new Promise<any>((res, rej) => {
+    const o = indexedDB.open(db); o.onerror = () => rej(o.error);
+    o.onsuccess = () => { const r = o.result.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => { res(r.result); o.result.close(); }; r.onerror = () => rej(r.error); };
+  });
 
-    // Set up a normal initial state
-    await cAtomic.getOrCreateMeshKey();
-    await cAtomic.exportRecoveryShare();
+  it('abort between put and delete leaves previous state intact', async () => {
+    const c = createVaultClient({ storage: 'idb', dbName: 'jat', pbkdf2Iterations: 310_000 });
+    await c.unlock({ passphrase: 'p' });
+    const mk = await c.getOrCreateMeshKey();
+    await c.exportRecoveryShare();
+    const before = await rawDB('jat', 'meshKeyWrapped');
+    const orig = IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete = function (this: IDBObjectStore, key: any) {
+      if (key === 'deviceShare') { this.transaction.abort(); throw new DOMException('aborted', 'AbortError'); }
+      return orig.call(this, key);
+    } as any;
+    try { await expect(c.importMeshKey(randomBytes(32), { replace: true })).rejects.toBeDefined(); }
+    finally { IDBObjectStore.prototype.delete = orig; }
+    expect(await rawDB('jat', 'meshKeyWrapped')).toBe(before);
+    expect(await rawDB('jat', 'deviceShare')).toBeDefined();
+    expect(await rawDB('jat', 'recoveryShown')).toBe(true);
+    expect((await c.getOrCreateMeshKey()).raw).toEqual(mk.raw);
+  });
 
-    const raw2 = randomBytes(32);
-
-    const reqDbAtomic = indexedDB.open(dbName);
-    const dbAtomic = await new Promise<IDBDatabase>((res, rej) => {
-      reqDbAtomic.onsuccess = () => res(reqDbAtomic.result);
-      reqDbAtomic.onerror = () => rej(reqDbAtomic.error);
-    });
-
-    const origTx = IDBDatabase.prototype.transaction;
-    try {
-      IDBDatabase.prototype.transaction = function(storeNames, mode) {
-        const tx = origTx.apply(this, [storeNames, mode]);
-        if (mode === 'readwrite') {
-          const origObj = tx.objectStore.bind(tx);
-          tx.objectStore = function(name) {
-            const store = origObj(name);
-            const origDel = store.delete.bind(store);
-            store.delete = function(key) {
-              if (key === 'deviceShare') {
-                this.put('fake-old-wrapped', 'meshKeyWrapped');
-                const req = {
-                  onsuccess: null,
-                  onerror: null,
-                  get error() { return new Error('Abort'); }
-                } as unknown as IDBRequest;
-                setTimeout(() => { if (req.onerror) (req as any).onerror({ target: req }); }, 0);
-                return req;
-              }
-              if (key === 'recoveryShown') {
-                // Ignore the deletion of recoveryShown to simulate that the whole tx was aborted when deviceShare failed.
-                const req = {
-                  onsuccess: null,
-                  onerror: null,
-                  get result() { return undefined; }
-                } as unknown as IDBRequest;
-                setTimeout(() => { if (req.onsuccess) (req as any).onsuccess({ target: req }); }, 0);
-                return req;
-              }
-              return origDel.call(this, key);
-            };
-            return store;
-          };
-        }
-        return tx;
-      };
-
-      try {
-        await cAtomic.importMeshKey(raw2, { replace: true });
-        expect.unreachable("Atomicity test failed to throw");
-      } catch (e) {
-        expect(e).toBeDefined();
-      }
-    } finally {
-      IDBDatabase.prototype.transaction = origTx;
-    }
-
-    const reqDbAtomicCheck = indexedDB.open(dbName);
-    const dbAtomicCheck = await new Promise<IDBDatabase>((res, rej) => {
-      reqDbAtomicCheck.onsuccess = () => res(reqDbAtomicCheck.result);
-      reqDbAtomicCheck.onerror = () => rej(reqDbAtomicCheck.error);
-    });
-
-    const tx = dbAtomicCheck.transaction('kv', 'readonly');
-    const store = tx.objectStore('kv');
-    const getProm = (k: string) => new Promise<any>((res, rej) => {
-      const r = store.get(k);
-      r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
-    });
-
-    const ds = await getProm('deviceShare');
-    const rs = await getProm('recoveryShown');
-    const wrapped = await getProm('meshKeyWrapped');
-
-    // The previous state should be intact. (deviceShare present, recoveryShown true).
-    expect(ds).toBeDefined();
-    expect(rs).toBe(true);
+  it('concurrent imports without replace: exactly one wins', async () => {
+    const c = createVaultClient({ storage: 'idb', dbName: 'jrace', pbkdf2Iterations: 310_000 });
+    await c.unlock({ passphrase: 'p' });
+    const r = await Promise.allSettled([c.importMeshKey(randomBytes(32)), c.importMeshKey(randomBytes(32))]);
+    expect(r.filter(x => x.status === 'fulfilled').length).toBe(1);
   });
 
   it('locked vault refuses importMeshKey and recoverMeshKeyFromShares with LOCKED', async () => {
