@@ -154,9 +154,11 @@ async function wrapWith(raw: Uint8Array, kek: CryptoKey): Promise<string> {
 async function unwrapWith(wrapped: string, kek: CryptoKey): Promise<Uint8Array> {
   const parts = wrapped.split('.');
   if (parts.length !== 3 || parts[0] !== 'v1') throw new VaultError('BAD_FORMAT', 'formato de clave envuelta invalido');
+  const iv = fromBase64Url(parts[1]);
+  if (iv.length !== 12) throw new VaultError('BAD_FORMAT', 'iv invalido');
   try {
     const pt = await subtle().decrypt(
-      { name: 'AES-GCM', iv: bs(fromBase64Url(parts[1])) },
+      { name: 'AES-GCM', iv: bs(iv) },
       kek,
       bs(fromBase64Url(parts[2])),
     );
@@ -326,11 +328,16 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
     unwrapKey: (wrapped, k) => unwrapWith(wrapped, needKek(k)),
 
-    wrapBytes: (raw) => {
-      if (raw.length === 0 || raw.length > 65536) throw new VaultError('BAD_PARAMS', 'se esperan de 1 a 65536 bytes');
-      return wrapWith(raw, needKek());
+    wrapBytes: async (raw) => {
+      const k = needKek();
+      if (!(raw instanceof Uint8Array) || raw.byteLength === 0 || raw.byteLength > 65536) throw new VaultError('BAD_PARAMS', 'se esperan de 1 a 65536 bytes');
+      return wrapWith(raw, k);
     },
-    unwrapBytes: (wrapped) => unwrapWith(wrapped, needKek()),
+    unwrapBytes: async (wrapped) => {
+      const k = needKek();
+      if (typeof wrapped !== 'string') throw new VaultError('BAD_FORMAT', 'wrapped debe ser un string');
+      return unwrapWith(wrapped, k);
+    },
 
     async getEpoch() {
       return (await get<number>('epoch')) ?? 0;
