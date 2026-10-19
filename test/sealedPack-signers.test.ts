@@ -153,7 +153,6 @@ describe('SealedPack migration from v2 to v3', () => {
     const v2pack = await createV2Mock();
     const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
 
-    // @ts-expect-error missing pins
     await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp)).rejects.toThrow('requires pinnedPublicKeys');
     await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [])).rejects.toThrow('requires pinnedPublicKeys');
   });
@@ -274,5 +273,6 @@ describe('SealedPack migration from v2 to v3', () => {
     const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
     const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey]);
     expect(migrated.metadata).toEqual(v2pack.metadata);
+    expect(migrated.metadata).not.toBe(v2pack.metadata);
   });
 });
