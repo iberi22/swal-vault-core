@@ -154,7 +154,12 @@ async function wrapWith(raw: Uint8Array, kek: CryptoKey): Promise<string> {
 async function unwrapWith(wrapped: string, kek: CryptoKey): Promise<Uint8Array> {
   const parts = wrapped.split('.');
   if (parts.length !== 3 || parts[0] !== 'v1') throw new VaultError('BAD_FORMAT', 'formato de clave envuelta invalido');
-  const iv = fromBase64Url(parts[1]);
+  let iv: Uint8Array;
+  try {
+    iv = fromBase64Url(parts[1]);
+  } catch {
+    throw new VaultError('BAD_FORMAT', 'iv invalido');
+  }
   if (iv.length !== 12) throw new VaultError('BAD_FORMAT', 'iv invalido');
   try {
     const pt = await subtle().decrypt(
