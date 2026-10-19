@@ -278,6 +278,7 @@ export async function createSealedPack(
     signer?: { alg: 'Ed25519' | 'ECDSA-P256'; publicKey: Uint8Array; sign(data: Uint8Array): Promise<Uint8Array> };
   } = {},
 ): Promise<SealedPack> {
+  if (keyPair && options.signer) throw new Error('Cannot provide both keyPair and options.signer');
   assertMetadataWhitelisted(metadata, options.extraClearKeys ?? []);
   const dek = randomBytes(32);
   const iv = randomBytes(12);
@@ -390,11 +391,12 @@ export async function migratePackV2ToV3(
   pinnedPublicKeys?: string[]
 ): Promise<SealedPack> {
   if (!keyPairOrSigner) throw new Error('migratePackV2ToV3 requires a fresh keyPair or signer');
+  if (!pinnedPublicKeys || pinnedPublicKeys.length === 0) throw new Error('migratePackV2ToV3 requires pinnedPublicKeys');
   if ((pack.v ?? 2) !== 2) throw new Error('migratePackV2ToV3 solo acepta packs v2');
   if (!(await verifySealedPackHash(pack))) throw new Error('Pack hash invalido');
   if (!(await verifySealedPackSignature(pack, pinnedPublicKeys))) throw new Error('Pack signature invalida');
   const payload = await unpackSealedPack(pack, shares);
-  const metadata = pack.metadata;
+  const metadata = { ...pack.metadata };
 
   let keyPair: SealedPackKeyPair | undefined;
   let signer: { alg: 'Ed25519' | 'ECDSA-P256'; publicKey: Uint8Array; sign(data: Uint8Array): Promise<Uint8Array> } | undefined;
