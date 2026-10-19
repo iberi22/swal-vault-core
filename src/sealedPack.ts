@@ -320,6 +320,11 @@ export async function createSealedPack(
     chainId: _econChainId,
   };
   if (sigAlg) pack.sigAlg = sigAlg;
+
+  // Verify the signature we just created
+  if (!(await verifySealedPackSignature(pack))) {
+    throw new Error('Generacion de firma invalida');
+  }
   return pack;
 }
 
@@ -350,8 +355,10 @@ export async function verifySealedPackHash(pack: SealedPack): Promise<boolean> {
 export async function verifySealedPackSignature(pack: SealedPack, pinnedPublicKeys?: string[]): Promise<boolean> {
   if (pinnedPublicKeys && !pinnedPublicKeys.includes(pack.publicKey)) return false;
   try {
-    const alg = pack.sigAlg ?? 'Ed25519';
-    if (alg === 'ECDSA-P256') {
+    const alg = pack.sigAlg;
+    if (alg !== undefined && alg !== 'Ed25519' && alg !== 'ECDSA-P256') return false;
+    const finalAlg = alg ?? 'Ed25519';
+    if (finalAlg === 'ECDSA-P256') {
       const key = await subtle().importKey('spki', bs(fromHex(pack.publicKey)), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
       return await subtle().verify({ name: 'ECDSA', hash: 'SHA-256' }, key, bs(fromHex(pack.signature)), bs(utf8(pack.content_hash)));
     } else {
@@ -376,10 +383,32 @@ export function registerOnPolygon(_pack: SealedPack, _bus?: unknown): never {
   throw new Error('registerOnPolygon: not implemented');
 }
 
-export async function migratePackV2ToV3(pack: SealedPack, shares: DEKShare[]): Promise<SealedPack> {
+export async function migratePackV2ToV3(
+  pack: SealedPack,
+  shares: DEKShare[],
+  keyPairOrSigner?: SealedPackKeyPair | { alg: 'Ed25519' | 'ECDSA-P256'; publicKey: Uint8Array; sign(data: Uint8Array): Promise<Uint8Array> },
+  pinnedPublicKeys?: string[]
+): Promise<SealedPack> {
+  if (!keyPairOrSigner) throw new Error('migratePackV2ToV3 requires a fresh keyPair or signer');
+  if ((pack.v ?? 2) !== 2) throw new Error('migratePackV2ToV3 solo acepta packs v2');
+  if (!(await verifySealedPackHash(pack))) throw new Error('Pack hash invalido');
+  if (!(await verifySealedPackSignature(pack, pinnedPublicKeys))) throw new Error('Pack signature invalida');
   const payload = await unpackSealedPack(pack, shares);
   const metadata = pack.metadata;
-  return createSealedPack(payload, metadata, undefined, {
+
+  let keyPair: SealedPackKeyPair | undefined;
+  let signer: { alg: 'Ed25519' | 'ECDSA-P256'; publicKey: Uint8Array; sign(data: Uint8Array): Promise<Uint8Array> } | undefined;
+
+  if ('alg' in keyPairOrSigner) {
+    signer = keyPairOrSigner;
+  } else {
+    keyPair = keyPairOrSigner;
+  }
+
+  const migrated = await createSealedPack(payload, metadata, keyPair, {
     extraClearKeys: Object.keys(metadata).filter((k) => !CLEAR_METADATA_KEYS.includes(k)),
+    signer,
   });
+  migrated.id = pack.id;
+  return migrated;
 }

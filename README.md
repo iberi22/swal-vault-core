@@ -244,3 +244,8 @@ npm pack --dry-run
 ## License
 
 [Apache-2.0](LICENSE) © 2026 SouthWest AI Labs (SWAL)
+
+
+### Signature and Migration Details
+ECDSA P-256 signatures are expected in raw `r||s` format (64 bytes), not DER. Note that ECDSA signatures may be malleable (high-s vs low-s).
+The `migratePackV2ToV3` helper requires the caller to provide the original pack, which will be verified (integrity and signature, using pinned keys if applicable) before migration. The helper requires a fresh signer or key pair to sign the migrated pack, and preserves the original pack's `id`. Only packs with `v === 2` can be migrated.
