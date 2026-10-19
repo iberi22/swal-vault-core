@@ -73,6 +73,9 @@ export interface VaultClient {
   wrapKey(raw32: Uint8Array, kek?: CryptoKey): Promise<string>;
   unwrapKey(wrapped: string, kek?: CryptoKey): Promise<Uint8Array>;
 
+  wrapBytes(raw: Uint8Array): Promise<string>;
+  unwrapBytes(wrapped: string): Promise<Uint8Array>;
+
   getOrCreateMeshKey(): Promise<MeshKey>;
   rotateMeshKey(): Promise<{ raw: Uint8Array; epoch: number }>;
   getEpoch(): Promise<number>;
@@ -322,6 +325,12 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       return wrapWith(raw32, needKek(k));
     },
     unwrapKey: (wrapped, k) => unwrapWith(wrapped, needKek(k)),
+
+    wrapBytes: (raw) => {
+      if (raw.length === 0 || raw.length > 65536) throw new VaultError('BAD_PARAMS', 'se esperan de 1 a 65536 bytes');
+      return wrapWith(raw, needKek());
+    },
+    unwrapBytes: (wrapped) => unwrapWith(wrapped, needKek()),
 
     async getEpoch() {
       return (await get<number>('epoch')) ?? 0;
