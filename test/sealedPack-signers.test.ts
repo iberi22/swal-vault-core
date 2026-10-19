@@ -13,6 +13,16 @@ describe('SealedPack signers and pinning', () => {
   const meta = { entity: 'vehicle', timestamp: 123456 };
   const payload = utf8('hello world');
 
+  it('createSealedPack throws if both keyPair and options.signer are provided', async () => {
+    const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
+    const signer = {
+      alg: 'Ed25519' as const,
+      publicKey: new Uint8Array(32),
+      sign: async () => new Uint8Array(64)
+    };
+    await expect(createSealedPack(payload, meta, kp, { signer })).rejects.toThrow('Cannot provide both keyPair and options.signer');
+  });
+
   it('a pack with no signer has no sigAlg and verifies', async () => {
     const pack = await createSealedPack(payload, meta);
     expect(pack.sigAlg).toBeUndefined();
@@ -134,9 +144,35 @@ describe('SealedPack migration from v2 to v3', () => {
     return v2pack;
   };
 
+  it('migratePackV2ToV3 throws if no signer/keyPair is provided', async () => {
+    const v2pack = await createV2Mock();
+    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), undefined, [v2pack.publicKey])).rejects.toThrow('requires a fresh keyPair or signer');
+  });
+
+  it('migratePackV2ToV3 throws if pinnedPublicKeys is undefined or empty', async () => {
+    const v2pack = await createV2Mock();
+    const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
+
+    // @ts-expect-error missing pins
+    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp)).rejects.toThrow('requires pinnedPublicKeys');
+    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [])).rejects.toThrow('requires pinnedPublicKeys');
+  });
+
+  it('migratePackV2ToV3 throws if pinnedPublicKeys does not contain the pack key', async () => {
+    const v2pack = await createV2Mock();
+    const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
+    const wrongKey = toHex(randomBytes(32));
+
+    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [wrongKey])).rejects.toThrow('Pack signature invalida');
+
+    // Mismo pack, clave correcta -> funciona
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey]);
+    expect(migrated.v).toBe(3);
+  });
+
   it('migratePackV2ToV3 returns a pack with v === 3 whose payload round-trips through unpackSealedPack', async () => {
     const v2pack = await createV2Mock();
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any, [v2pack.publicKey]);
     expect(migrated.v).toBe(3);
     const recovered = await unpackSealedPack(migrated, migrated.shares.slice(0, 2));
     expect(recovered).toEqual(payload);
@@ -144,7 +180,7 @@ describe('SealedPack migration from v2 to v3', () => {
 
   it('the migrated pack has different shares than the input', async () => {
     const v2pack = await createV2Mock();
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any, [v2pack.publicKey]);
     expect(migrated.shares[0].value).not.toBe(v2pack.shares[0].value);
     expect(migrated.shares[1].value).not.toBe(v2pack.shares[1].value);
   });
@@ -152,7 +188,7 @@ describe('SealedPack migration from v2 to v3', () => {
   it('migration with a wrong pair of shares throws', async () => {
     const v2pack = await createV2Mock();
     const wrongShares = [{ ...v2pack.shares[0], value: 'wrong', v: 2 }, v2pack.shares[1]];
-    await expect(migratePackV2ToV3(v2pack, wrongShares, await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any)).rejects.toThrow();
+    await expect(migratePackV2ToV3(v2pack, wrongShares, await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any, [v2pack.publicKey])).rejects.toThrow();
   });
 
   it('the input pack is unchanged after migration (compare content_hash, ciphertext and shares)', async () => {
@@ -161,7 +197,7 @@ describe('SealedPack migration from v2 to v3', () => {
     const originalCiphertext = v2pack.ciphertext;
     const originalShares = JSON.parse(JSON.stringify(v2pack.shares));
 
-    await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any);
+    await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any, [v2pack.publicKey]);
 
     expect(v2pack.content_hash).toBe(originalHash);
     expect(v2pack.ciphertext).toBe(originalCiphertext);
@@ -170,7 +206,7 @@ describe('SealedPack migration from v2 to v3', () => {
 
   it('verifySealedPackHash still returns true for the migrated pack', async () => {
     const v2pack = await createV2Mock();
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any, [v2pack.publicKey]);
     expect(await verifySealedPackHash(migrated)).toBe(true);
   });
 
@@ -180,11 +216,11 @@ describe('SealedPack migration from v2 to v3', () => {
 
     // Tamper hash
     const badHashPack = { ...v2pack, content_hash: '0x' + toHex(randomBytes(32)) };
-    await expect(migratePackV2ToV3(badHashPack, v2pack.shares.slice(0, 2), kp)).rejects.toThrow('Pack hash invalido');
+    await expect(migratePackV2ToV3(badHashPack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey])).rejects.toThrow('Pack hash invalido');
 
     // Tamper signature
     const badSigPack = { ...v2pack, signature: toHex(randomBytes(64)) };
-    await expect(migratePackV2ToV3(badSigPack, v2pack.shares.slice(0, 2), kp)).rejects.toThrow('Pack signature invalida');
+    await expect(migratePackV2ToV3(badSigPack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey])).rejects.toThrow('Pack signature invalida');
   });
 
   it('migratePackV2ToV3 correctly applies the provided signer, resulting in a defined sigAlg', async () => {
@@ -205,7 +241,7 @@ describe('SealedPack migration from v2 to v3', () => {
       }
     };
 
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), signer);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), signer, [v2pack.publicKey]);
     expect(migrated.sigAlg).toBe('ECDSA-P256');
     expect(await verifySealedPackSignature(migrated)).toBe(true);
   });
@@ -214,7 +250,7 @@ describe('SealedPack migration from v2 to v3', () => {
     const v2pack = await createV2Mock();
     v2pack.id = 'my-custom-id-123';
     const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey]);
     expect(migrated.id).toBe('my-custom-id-123');
   });
 
@@ -222,7 +258,7 @@ describe('SealedPack migration from v2 to v3', () => {
     const v2pack = await createV2Mock();
     v2pack.v = 3;
     const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
-    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp)).rejects.toThrow('solo acepta packs v2');
+    await expect(migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey])).rejects.toThrow('solo acepta packs v2');
   });
 
   it('verifySealedPackSignature returns false for unknown sigAlg values', async () => {
@@ -236,7 +272,7 @@ describe('SealedPack migration from v2 to v3', () => {
   it('migration does not drop metadata', async () => {
     const v2pack = await createV2Mock();
     const kp = await globalThis.crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']) as any;
-    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp);
+    const migrated = await migratePackV2ToV3(v2pack, v2pack.shares.slice(0, 2), kp, [v2pack.publicKey]);
     expect(migrated.metadata).toEqual(v2pack.metadata);
   });
 });
