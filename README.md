@@ -156,11 +156,18 @@ Low-level Shamir Secret Sharing implementation over $\text{GF}(257)$ (v2) and $\
 - `splitDEK(dek: Uint8Array, version = 3)`: Returns an array of 3 `DEKShare` objects ($x \in \{1, 2, 3\}$), tagged with `v: version`.
 - `reconstructDEK(shares: DEKShare[])`: Takes 2 distinct shares and returns the original 32-byte DEK. It dispatches to the correct field based on `share.v ?? 2`. Note: `v` is part of the share format; a v3 share serialized without `v` reconstructs a wrong key silently.
 
+### Pack versions
+
+| Version | Field | Status |
+|---|---|---|
+| v2 | $\text{GF}(257)$ | read-only legacy |
+| v3 | $\text{GF}(2^8)$ | current |
+
 #### `verifySealedPackHash(pack)`
 Asynchronously validates that the pack's `content_hash` matches `SHA-256(ciphertext || sorted(metadata))`. Returns `Promise<boolean>`.
 
-#### `verifySealedPackSignature(pack)`
-Verifies the Ed25519 signature over `content_hash` using the embedded `publicKey`. Returns `Promise<boolean>`.
+#### `verifySealedPackSignature(pack, pinnedPublicKeys?)`
+Verifies the signature over `content_hash` using the embedded `publicKey` and the signature algorithm (`pack.sigAlg ?? 'Ed25519'`, which can also be `'ECDSA-P256'`). Note that verification without `pinnedPublicKeys` proves integrity only (the bytes were not altered in transit), not authorship. If `pinnedPublicKeys` is provided, it fails unless `pack.publicKey` is in the list. Returns `Promise<boolean>`.
 
 #### `R2StorageClient`
 Storage client adapter for Cloudflare R2 / S3 storage:
@@ -202,7 +209,7 @@ Creates a browser vault manager backed by IndexedDB.
 
 ## Security Notes
 
-1. **Threshold Secrecy:** Shamir secret sharing over $\text{GF}(257)$ provides information-theoretic security for the threshold: any single share ($k=1$) reveals zero information about the underlying encryption key.
+1. **Threshold Secrecy:** Shamir secret sharing provides information-theoretic security for the threshold: any single share ($k=1$) reveals zero information about the underlying encryption key in v3 (which uses unbiased $\text{GF}(2^8)$), while v2 used $\text{GF}(257)$ and had a small bias.
 2. **Cloud Boundary Invariant:** At no point should any single backend service accumulate 2 or more shares. Cloud storage (R2/S3) must only receive packs stripped of shares (`packWithoutShares`). Cloud databases (such as Cloudflare D1) must only ever store share $x=3$. Both `uploadSealedPack` and `storeCloudShare` enforce this programmatically (`assertCloudSharesSafe`).
 3. **AEAD Authentication:** Pack format v2 binds metadata directly into AES-GCM via AAD (`swal-vault/v2|...`). Any alteration to ciphertext, initialization vector, authentication tag, or metadata properties will fail decryption.
 4. **Clear Metadata Whitelist:** To prevent accidental data leaks in plaintext metadata fields, `createSealedPack` enforces a strict whitelist (`CLEAR_METADATA_KEYS`: `vehicleId`, `entityId`, `entity`, `appId`, `instanceId`, `timestamp`, `recordCount`, `deviceId`). Custom fields require explicit opt-in via `extraClearKeys`.

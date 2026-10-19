@@ -55,6 +55,7 @@ export interface SealedPack {
   shares: DEKShare[];
   signature: string;
   publicKey: string;
+  sigAlg?: 'Ed25519' | 'ECDSA-P256';
   metadata: SealedPackMetadata;
   chain: string;
   chainId: number;
@@ -272,7 +273,10 @@ export async function createSealedPack(
   payload: Uint8Array,
   metadata: SealedPackMetadata,
   keyPair?: SealedPackKeyPair,
-  options: { extraClearKeys?: string[] } = {},
+  options: {
+    extraClearKeys?: string[];
+    signer?: { alg: 'Ed25519' | 'ECDSA-P256'; publicKey: Uint8Array; sign(data: Uint8Array): Promise<Uint8Array> };
+  } = {},
 ): Promise<SealedPack> {
   assertMetadataWhitelisted(metadata, options.extraClearKeys ?? []);
   const dek = randomBytes(32);
@@ -285,9 +289,23 @@ export async function createSealedPack(
   const tag = sealed.subarray(sealed.length - 16);
   const shares = splitDEK(dek, PACK_VERSION);
   const contentHash = await computeContentHashAsync(ct, metadata);
-  const { priv, pubSpki } = await resolveKeyPair(keyPair);
-  const sig = new Uint8Array(await subtle().sign({ name: 'Ed25519' }, priv, bs(utf8(contentHash))));
-  return {
+
+  let sigAlg: 'Ed25519' | 'ECDSA-P256' | undefined;
+  let signatureHex: string;
+  let publicKeyHex: string;
+
+  if (options.signer) {
+    sigAlg = options.signer.alg;
+    publicKeyHex = toHex(options.signer.publicKey);
+    signatureHex = toHex(await options.signer.sign(utf8(contentHash)));
+  } else {
+    const { priv, pubSpki } = await resolveKeyPair(keyPair);
+    const sigBytes = new Uint8Array(await subtle().sign({ name: 'Ed25519' }, priv, bs(utf8(contentHash))));
+    signatureHex = toHex(sigBytes);
+    publicKeyHex = toHex(pubSpki);
+  }
+
+  const pack: SealedPack = {
     v: PACK_VERSION,
     id: `pack-${globalThis.crypto.randomUUID()}`,
     content_hash: contentHash,
@@ -295,12 +313,14 @@ export async function createSealedPack(
     iv: toBase64(iv),
     tag: toBase64(tag),
     shares,
-    signature: toHex(sig),
-    publicKey: toHex(pubSpki),
+    signature: signatureHex,
+    publicKey: publicKeyHex,
     metadata,
     chain: _econChain,
     chainId: _econChainId,
   };
+  if (sigAlg) pack.sigAlg = sigAlg;
+  return pack;
 }
 
 export async function unpackSealedPack(pack: SealedPack, shares: DEKShare[]): Promise<Uint8Array> {
@@ -326,11 +346,18 @@ export async function verifySealedPackHash(pack: SealedPack): Promise<boolean> {
   return exp.toLowerCase() === pack.content_hash.toLowerCase();
 }
 
-/** Verifica la firma Ed25519 del content_hash con la publicKey del pack. */
-export async function verifySealedPackSignature(pack: SealedPack): Promise<boolean> {
+/** Verifica la firma del content_hash con la publicKey del pack. */
+export async function verifySealedPackSignature(pack: SealedPack, pinnedPublicKeys?: string[]): Promise<boolean> {
+  if (pinnedPublicKeys && !pinnedPublicKeys.includes(pack.publicKey)) return false;
   try {
-    const key = await subtle().importKey('spki', bs(fromHex(pack.publicKey)), { name: 'Ed25519' }, false, ['verify']);
-    return await subtle().verify({ name: 'Ed25519' }, key, bs(fromHex(pack.signature)), bs(utf8(pack.content_hash)));
+    const alg = pack.sigAlg ?? 'Ed25519';
+    if (alg === 'ECDSA-P256') {
+      const key = await subtle().importKey('spki', bs(fromHex(pack.publicKey)), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+      return await subtle().verify({ name: 'ECDSA', hash: 'SHA-256' }, key, bs(fromHex(pack.signature)), bs(utf8(pack.content_hash)));
+    } else {
+      const key = await subtle().importKey('spki', bs(fromHex(pack.publicKey)), { name: 'Ed25519' }, false, ['verify']);
+      return await subtle().verify({ name: 'Ed25519' }, key, bs(fromHex(pack.signature)), bs(utf8(pack.content_hash)));
+    }
   } catch {
     return false;
   }
@@ -347,4 +374,12 @@ export function packMetadataForEntity(entity: string, id: string, appId: string,
  */
 export function registerOnPolygon(_pack: SealedPack, _bus?: unknown): never {
   throw new Error('registerOnPolygon: not implemented');
+}
+
+export async function migratePackV2ToV3(pack: SealedPack, shares: DEKShare[]): Promise<SealedPack> {
+  const payload = await unpackSealedPack(pack, shares);
+  const metadata = pack.metadata;
+  return createSealedPack(payload, metadata, undefined, {
+    extraClearKeys: Object.keys(metadata).filter((k) => !CLEAR_METADATA_KEYS.includes(k)),
+  });
 }
