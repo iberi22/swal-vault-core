@@ -152,9 +152,9 @@ Reconstructs the 32-byte DEK from any two valid `DEKShare` objects, verifies the
 Returns a shallow copy of `pack` with `shares: []`. Safe for transmitting to cloud backends.
 
 #### `splitDEK(dek)` / `reconstructDEK(shares)`
-Low-level Shamir Secret Sharing implementation over $\text{GF}(257)$.
-- `splitDEK(dek: Uint8Array)`: Returns an array of 3 `DEKShare` objects ($x \in \{1, 2, 3\}$).
-- `reconstructDEK(shares: DEKShare[])`: Takes 2 distinct shares and returns the original 32-byte DEK.
+Low-level Shamir Secret Sharing implementation over $\text{GF}(257)$ (v2) and $\text{GF}(2^8)$ (v3).
+- `splitDEK(dek: Uint8Array, version = 3)`: Returns an array of 3 `DEKShare` objects ($x \in \{1, 2, 3\}$), tagged with `v: version`.
+- `reconstructDEK(shares: DEKShare[])`: Takes 2 distinct shares and returns the original 32-byte DEK. It dispatches to the correct field based on `share.v ?? 2`. Note: `v` is part of the share format; a v3 share serialized without `v` reconstructs a wrong key silently.
 
 #### `verifySealedPackHash(pack)`
 Asynchronously validates that the pack's `content_hash` matches `SHA-256(ciphertext || sorted(metadata))`. Returns `Promise<boolean>`.
