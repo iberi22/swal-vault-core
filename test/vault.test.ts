@@ -125,7 +125,7 @@ describe('propiedades Shamir', () => {
       expect(() => reconstructDEK([s[0]])).toThrow();
       expect(() => reconstructDEK([s[1], s[1]])).toThrow();
       // una share sola no da informacion directa: usarla como "DEK" con otra falsa no reconstruye
-      expect(reconstructDEK([s[0], { index: 2, value: toBase64(randomBytes(32)) }])).not.toEqual(dek);
+      expect(reconstructDEK([s[0], { index: 2, value: toBase64(randomBytes(32)), v: 3 }])).not.toEqual(dek);
     }
   });
 });
@@ -159,7 +159,7 @@ describe('AAD y manipulacion (V6)', () => {
     const ct = sealed.subarray(0, sealed.length - 16), tag = sealed.subarray(sealed.length - 16);
     const pack: any = {
       id: 'legacy', content_hash: await computeContentHashAsync(ct, meta), ciphertext: toBase64(ct), iv: toBase64(iv),
-      tag: toBase64(tag), shares: splitDEK(dek), signature: '', publicKey: '', metadata: meta, chain: 'polygon', chainId: 137,
+      tag: toBase64(tag), shares: splitDEK(dek, 2), signature: '', publicKey: '', metadata: meta, chain: 'polygon', chainId: 137,
     };
     expect(await unpackSealedPack(pack, pack.shares.slice(0, 2))).toEqual(payload);
   });
@@ -167,7 +167,7 @@ describe('AAD y manipulacion (V6)', () => {
     const p = await createSealedPack(payload, meta);
     const dek = reconstructDEK(p.shares.slice(1));
     const key = await globalThis.crypto.subtle.importKey('raw', bs(dek), 'AES-GCM', false, ['decrypt']);
-    const aad = utf8(`swal-vault/v2|{"entity":"x","timestamp":1}`);
+    const aad = utf8(`swal-vault/v3|{"entity":"x","timestamp":1}`);
     const dec = await globalThis.crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: bs(fromBase64(p.iv)), tagLength: 128, additionalData: bs(aad) }, key, bs(concatBytes(fromBase64(p.ciphertext), fromBase64(p.tag))));
     expect(new Uint8Array(dec)).toEqual(payload);
