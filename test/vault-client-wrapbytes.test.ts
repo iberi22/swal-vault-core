@@ -112,25 +112,29 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
     await expect(c.unwrapBytes('v1.a.b')).rejects.toMatchObject({ code: 'LOCKED' });
   });
 
-  it('wrong-KEK (dos clientes, distinto passphrase)', async () => {
+  it('wrong-KEK ahora rechaza solo la meshKeyWrapped, por lo que nunca llega a unwrapBytes si está locked, y si unlock falla o intentas desempacar, no debes poder (prueba de aislamiento)', async () => {
     await c.unlock({ passphrase: 'test' });
     const wrapped = await c.wrapBytes(randomBytes(32));
-    const c2 = client();
-    await c2.unlock({ passphrase: 'test2' });
-    await expect(c2.unwrapBytes(wrapped)).rejects.toMatchObject({ code: 'BAD_KEY' });
+    const currentDbName = `twb${n - 1}`;
+    const c2 = client({ dbName: currentDbName }); // mismo db, distinta passphrase
+    await expect(c2.unlock({ passphrase: 'test2' })).rejects.toMatchObject({ code: 'BAD_KEY' });
+    await expect(c2.unwrapBytes(wrapped)).rejects.toMatchObject({ code: 'LOCKED' });
   });
 
-  it('compatibilidad wrapKey y wrapBytes', async () => {
+  it('incompatibilidad intencionada wrapKey y wrapBytes', async () => {
     await c.unlock({ passphrase: 'test' });
     const raw = randomBytes(32);
-    const wrappedBytes = await c.wrapBytes(raw);
-    expect(await c.unwrapKey(wrappedBytes)).toEqual(raw);
 
+    // wrapBytes ya NO es compatible con unwrapKey (que sigue usando KEK)
+    const wrappedBytes = await c.wrapBytes(raw);
+    await expect(c.unwrapKey(wrappedBytes)).rejects.toMatchObject({ code: 'BAD_KEY' });
+
+    // wrapKey NO es compatible con unwrapBytes (que usa secretsKey)
     const wrappedKey = await c.wrapKey(raw);
-    expect(await c.unwrapBytes(wrappedKey)).toEqual(raw);
+    await expect(c.unwrapBytes(wrappedKey)).rejects.toMatchObject({ code: 'BAD_KEY' });
   });
 
-  it('pins v1 envelope path sin AAD, independiente, usando subtle', async () => {
+  it('pins v1 envelope path sin AAD, independiente, usando subtle para secretos de wrapBytes', async () => {
     const cPin = client({ dbName: 'twb-pin' });
 
     const subtle = globalThis.crypto.subtle;
@@ -162,7 +166,40 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
       ['encrypt', 'decrypt']
     );
 
-    // test decrypt WITHOUT AAD
+    // now we need to get meshKeyWrapped and secretsKeyWrapped to decrypt by hand
+    const mkwReq = new Promise<string>((resolve, reject) => {
+      const rq = indexedDB.open('twb-pin', 1);
+      rq.onsuccess = () => {
+         const getReq = rq.result.transaction('kv', 'readonly').objectStore('kv').get('meshKeyWrapped');
+         getReq.onsuccess = () => resolve(getReq.result);
+      };
+    });
+    const skwReq = new Promise<string>((resolve, reject) => {
+      const rq = indexedDB.open('twb-pin', 1);
+      rq.onsuccess = () => {
+         const getReq = rq.result.transaction('kv', 'readonly').objectStore('kv').get('secretsKeyWrapped');
+         getReq.onsuccess = () => resolve(getReq.result);
+      };
+    });
+
+    const meshKeyWrappedStr = await mkwReq;
+    const secretsKeyWrappedStr = await skwReq;
+
+    // Decrypt meshKeyWrapped
+    const mkwParts = meshKeyWrappedStr.split('.');
+    const mkIv = fromBase64Url(mkwParts[1]);
+    const mkCt = fromBase64Url(mkwParts[2]);
+    const meshKeyBytes = await subtle.decrypt({ name: 'AES-GCM', iv: bs(mkIv) }, kek, bs(mkCt));
+    const meshKey = await subtle.importKey('raw', bs(new Uint8Array(meshKeyBytes)), { name: 'AES-GCM' }, false, ['decrypt']);
+
+    // Decrypt secretsKeyWrapped
+    const skwParts = secretsKeyWrappedStr.split('.');
+    const skwIv = fromBase64Url(skwParts[1]);
+    const skwCt = fromBase64Url(skwParts[2]);
+    const secretsKeyBytes = await subtle.decrypt({ name: 'AES-GCM', iv: bs(skwIv) }, meshKey, bs(skwCt));
+    const secretsKey = await subtle.importKey('raw', bs(new Uint8Array(secretsKeyBytes)), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+
+    // test decrypt WITHOUT AAD (blob -> secretsKey)
     const parts = wrapped.split('.');
     const iv = fromBase64Url(parts[1]);
     expect(iv.length).toBe(12); // assert IV is 12 bytes
@@ -170,28 +207,28 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
 
     const pt = await subtle.decrypt(
       { name: 'AES-GCM', iv: bs(iv) }, // no additionalData
-      kek,
+      secretsKey,
       bs(ct)
     );
     expect(new Uint8Array(pt)).toEqual(raw);
 
-    // test reverse: hand encrypt blob without AAD
+    // test reverse: hand encrypt blob without AAD using secretsKey
     const newIv = randomBytes(12);
     const newRaw = new Uint8Array([0xAA, 0xBB]);
-    const newCt = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv) }, kek, bs(newRaw)));
+    const newCt = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv) }, secretsKey, bs(newRaw)));
     const newWrapped = `v1.${toBase64Url(newIv)}.${toBase64Url(newCt)}`;
 
     expect(await cPin.unwrapBytes(newWrapped)).toEqual(newRaw);
 
     // Mutants that must fail
     // 1. AAD added
-    const ctAAD = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv), additionalData: bs(utf8('aad')) }, kek, bs(newRaw)));
+    const ctAAD = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv), additionalData: bs(utf8('aad')) }, secretsKey, bs(newRaw)));
     const wrappedAAD = `v1.${toBase64Url(newIv)}.${toBase64Url(ctAAD)}`;
     await expect(cPin.unwrapBytes(wrappedAAD)).rejects.toMatchObject({ code: 'BAD_KEY' });
 
     // 2. IV length 16
     const iv16 = randomBytes(16);
-    const ct16 = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(iv16) }, kek, bs(newRaw)));
+    const ct16 = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(iv16) }, secretsKey, bs(newRaw)));
     const wrapped16 = `v1.${toBase64Url(iv16)}.${toBase64Url(ct16)}`;
     await expect(cPin.unwrapBytes(wrapped16)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
   });

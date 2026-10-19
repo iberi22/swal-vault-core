@@ -9,7 +9,7 @@
 //   * recuperacion: Shamir 2-de-3 sobre la meshKey; share 1 queda en el dispositivo,
 //     share 2 se muestra una sola vez al usuario, share 3 se devuelve para custodia opcional.
 
-import { bs, fromBase64Url, randomBytes, sha256, toBase64Url, utf8 } from '../bytes.js';
+import { bs, concatBytes, fromBase64Url, randomBytes, sha256, toBase64Url, utf8 } from '../bytes.js';
 import { reconstructDEK, splitDEK, type DEKShare } from '../sealedPack.js';
 
 export const MIN_PBKDF2_ITERATIONS = 310_000;
@@ -173,6 +173,10 @@ async function unwrapWith(wrapped: string, kek: CryptoKey): Promise<Uint8Array> 
   }
 }
 
+async function computeMeshKeyCheck(raw: Uint8Array): Promise<string> {
+  return toBase64Url(await sha256(concatBytes(utf8('swal-vault/mesh-check/v1'), raw)));
+}
+
 type Kv = {
   get: <T>(k: string) => Promise<T | undefined>;
   put: (k: string, v: unknown) => Promise<void>;
@@ -270,6 +274,19 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     return { raw, key };
   }
 
+  let mutexLock = Promise.resolve();
+  async function mutex<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = mutexLock;
+    let resolveLock!: () => void;
+    mutexLock = new Promise((r) => { resolveLock = r; });
+    await previous.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      resolveLock();
+    }
+  }
+
   const self: VaultClient = {
     async getDeviceIdentity() {
       let pair = await get<CryptoKeyPair>('deviceKeyPair');
@@ -303,7 +320,14 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
       const candidate = await deriveKek(o);
       // Si ya existe meshKey, valida la KEK (falla con BAD_KEY si es incorrecta).
       const wrapped = await get<string>('meshKeyWrapped');
-      if (wrapped) await unwrapWith(wrapped, candidate);
+      if (wrapped) {
+        const raw = await unwrapWith(wrapped, candidate);
+        const check = await get<string>('meshKeyCheck');
+        if (!check) {
+          const newCheck = await computeMeshKeyCheck(raw);
+          await put('meshKeyCheck', newCheck);
+        }
+      }
       kek = candidate;
     },
 
@@ -327,21 +351,33 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
     isUnlocked: () => kek !== null,
 
+    /** does not survive resetPassphrase; use wrapBytes for durable secrets */
     wrapKey: (raw32, k) => {
       if (raw32.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes');
       return wrapWith(raw32, needKek(k));
     },
+    /** does not survive resetPassphrase; use wrapBytes for durable secrets */
     unwrapKey: (wrapped, k) => unwrapWith(wrapped, needKek(k)),
 
     wrapBytes: async (raw) => {
-      const k = needKek();
+      needKek(); // Ensure unlocked
       if (!(raw instanceof Uint8Array) || raw.byteLength === 0 || raw.byteLength > 65536) throw new VaultError('BAD_PARAMS', 'se esperan de 1 a 65536 bytes');
-      return wrapWith(raw, k);
+      const meshKey = await self.getOrCreateMeshKey();
+      const secretsKeyWrapped = await get<string>('secretsKeyWrapped');
+      if (!secretsKeyWrapped) throw new VaultError('BAD_KEY', 'no hay secretsKeyWrapped');
+      const secretsKeyBytes = await unwrapWith(secretsKeyWrapped, meshKey.key);
+      const secretsKey = await subtle().importKey('raw', bs(secretsKeyBytes), { name: 'AES-GCM' }, false, ['encrypt']);
+      return wrapWith(raw, secretsKey);
     },
     unwrapBytes: async (wrapped) => {
-      const k = needKek();
+      needKek(); // Ensure unlocked
       if (typeof wrapped !== 'string') throw new VaultError('BAD_FORMAT', 'wrapped debe ser un string');
-      return unwrapWith(wrapped, k);
+      const meshKey = await self.getOrCreateMeshKey();
+      const secretsKeyWrapped = await get<string>('secretsKeyWrapped');
+      if (!secretsKeyWrapped) throw new VaultError('BAD_KEY', 'no hay secretsKeyWrapped');
+      const secretsKeyBytes = await unwrapWith(secretsKeyWrapped, meshKey.key);
+      const secretsKey = await subtle().importKey('raw', bs(secretsKeyBytes), { name: 'AES-GCM' }, false, ['decrypt']);
+      return unwrapWith(wrapped, secretsKey);
     },
 
     async getEpoch() {
@@ -349,41 +385,139 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
 
     async rotateMeshKey() {
-      const k = needKek();
-      const raw = randomBytes(32);
-      const wrapped = await wrapWith(raw, k);
+      return mutex(async () => {
+        const k = needKek();
+        const oldWrapped = await get<string>('meshKeyWrapped');
+        const oldMeshKey = oldWrapped ? await toMeshKey(await unwrapWith(oldWrapped, k)) : null;
 
-      return new Promise((resolve, reject) => {
-        db().then((dbInstance) => {
-          const t = dbInstance.transaction(STORE, 'readwrite');
-          const s = t.objectStore(STORE);
-          t.onerror = () => reject(t.error);
-          t.onabort = () => reject(t.error);
+        const raw = randomBytes(32);
+        const wrapped = await wrapWith(raw, k);
+        const newMeshKey = await toMeshKey(raw);
+        const check = await computeMeshKeyCheck(raw);
 
-          const getEpochReq = s.get('epoch');
-          getEpochReq.onsuccess = () => {
-            const epoch = (getEpochReq.result || 0) + 1;
-            s.put(wrapped, 'meshKeyWrapped');
-            s.put(epoch, 'epoch');
-            s.put(false, 'recoveryShown');
-            s.delete('deviceShare');
-            t.oncomplete = () => resolve({ raw, epoch });
-          };
-          getEpochReq.onerror = () => {
-            t.abort();
-            reject(getEpochReq.error);
-          };
-        }).catch(reject);
+        let newSecretsKeyWrapped: string | null = null;
+        if (oldMeshKey) {
+          const secretsKeyWrapped = await get<string>('secretsKeyWrapped');
+          if (secretsKeyWrapped) {
+            const secretsKeyBytes = await unwrapWith(secretsKeyWrapped, oldMeshKey.key);
+            newSecretsKeyWrapped = await wrapWith(secretsKeyBytes, newMeshKey.key);
+          }
+        }
+
+        return new Promise((resolve, reject) => {
+          db().then((dbInstance) => {
+            const t = dbInstance.transaction(STORE, 'readwrite');
+            const s = t.objectStore(STORE);
+            t.onerror = () => reject(t.error);
+            t.onabort = () => reject(t.error);
+
+            const getWrappedReq = s.get('meshKeyWrapped');
+            getWrappedReq.onsuccess = () => {
+              if (getWrappedReq.result !== oldWrapped) {
+                t.abort();
+                reject(new VaultError('BAD_KEY', 'la clave cambio concurrentemente'));
+                return;
+              }
+
+              const getEpochReq = s.get('epoch');
+              getEpochReq.onsuccess = () => {
+                const epoch = (getEpochReq.result || 0) + 1;
+                s.put(wrapped, 'meshKeyWrapped');
+                s.put(check, 'meshKeyCheck');
+                s.put(epoch, 'epoch');
+                s.put(false, 'recoveryShown');
+                s.delete('deviceShare');
+                if (newSecretsKeyWrapped) {
+                  s.put(newSecretsKeyWrapped, 'secretsKeyWrapped');
+                }
+                t.oncomplete = () => resolve({ raw, epoch });
+              };
+              getEpochReq.onerror = () => {
+                t.abort();
+                reject(getEpochReq.error);
+              };
+            };
+            getWrappedReq.onerror = () => {
+              t.abort();
+              reject(getWrappedReq.error);
+            };
+          }).catch(reject);
+        });
       });
     },
 
     async getOrCreateMeshKey() {
-      const k = needKek();
-      const wrapped = await get<string>('meshKeyWrapped');
-      if (wrapped) return toMeshKey(await unwrapWith(wrapped, k));
-      const raw = randomBytes(32);
-      await put('meshKeyWrapped', await wrapWith(raw, k));
-      return toMeshKey(raw);
+      return mutex(async () => {
+        const k = needKek();
+        let wrapped = await get<string>('meshKeyWrapped');
+        let meshKeyRaw: Uint8Array;
+        if (wrapped) {
+          meshKeyRaw = await unwrapWith(wrapped, k);
+        } else {
+          meshKeyRaw = randomBytes(32);
+          wrapped = await wrapWith(meshKeyRaw, k);
+          const check = await computeMeshKeyCheck(meshKeyRaw);
+
+          await new Promise<void>((resolve, reject) => {
+            db().then((dbInstance) => {
+              const t = dbInstance.transaction(STORE, 'readwrite');
+              const s = t.objectStore(STORE);
+              t.onerror = () => reject(t.error);
+              t.onabort = () => reject(t.error);
+
+              const getWrappedReq = s.get('meshKeyWrapped');
+              getWrappedReq.onsuccess = () => {
+                if (getWrappedReq.result) {
+                  // Ya se creó concurrentemente
+                  wrapped = getWrappedReq.result;
+                  resolve();
+                } else {
+                  s.put(wrapped, 'meshKeyWrapped');
+                  s.put(check, 'meshKeyCheck');
+                  t.oncomplete = () => resolve();
+                }
+              };
+              getWrappedReq.onerror = () => {
+                t.abort();
+                reject(getWrappedReq.error);
+              };
+            }).catch(reject);
+          });
+
+          if (wrapped !== (await get<string>('meshKeyWrapped'))) {
+             meshKeyRaw = await unwrapWith(wrapped, k);
+          }
+        }
+        const meshKey = await toMeshKey(meshKeyRaw);
+
+        let secretsKeyWrapped = await get<string>('secretsKeyWrapped');
+        if (!secretsKeyWrapped) {
+          const secretsKeyRaw = randomBytes(32);
+          const newSecretsKeyWrapped = await wrapWith(secretsKeyRaw, meshKey.key);
+          await new Promise<void>((resolve, reject) => {
+            db().then((dbInstance) => {
+              const t = dbInstance.transaction(STORE, 'readwrite');
+              const s = t.objectStore(STORE);
+              t.onerror = () => reject(t.error);
+              t.onabort = () => reject(t.error);
+
+              const getSecretsReq = s.get('secretsKeyWrapped');
+              getSecretsReq.onsuccess = () => {
+                if (!getSecretsReq.result) {
+                  s.put(newSecretsKeyWrapped, 'secretsKeyWrapped');
+                }
+                t.oncomplete = () => resolve();
+              };
+              getSecretsReq.onerror = () => {
+                t.abort();
+                reject(getSecretsReq.error);
+              };
+            }).catch(reject);
+          });
+        }
+
+        return meshKey;
+      });
     },
 
     async exportRecoveryShare(opts) {
@@ -477,51 +611,109 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
     },
 
     async importMeshKey(raw, opts) {
-      const k = needKek();
-      if (!(raw instanceof Uint8Array)) throw new VaultError('BAD_PARAMS', 'raw debe ser Uint8Array');
-      if (raw.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes para la meshKey');
-      const wrapped = await wrapWith(raw, k);
+      return mutex(async () => {
+        const k = needKek();
+        if (!(raw instanceof Uint8Array)) throw new VaultError('BAD_PARAMS', 'raw debe ser Uint8Array');
+        if (raw.length !== 32) throw new VaultError('BAD_PARAMS', 'se esperan 32 bytes para la meshKey');
 
-      return new Promise((resolve, reject) => {
-        db().then((dbInstance) => {
-          const t = dbInstance.transaction(STORE, 'readwrite');
-          const s = t.objectStore(STORE);
-          t.oncomplete = () => resolve();
-          t.onerror = () => reject(t.error);
-          t.onabort = () => reject(t.error);
+        const oldWrapped = await get<string>('meshKeyWrapped');
+        const oldMeshKey = oldWrapped ? await toMeshKey(await unwrapWith(oldWrapped, k)) : null;
 
-          const getReq = s.get('meshKeyWrapped');
-          getReq.onsuccess = () => {
-            if (getReq.result && !opts?.replace) {
+        const wrapped = await wrapWith(raw, k);
+        const check = await computeMeshKeyCheck(raw);
+        const newMeshKey = await toMeshKey(raw);
+
+        let newSecretsKeyWrapped: string | null = null;
+        if (oldMeshKey && opts?.replace) {
+           const secretsKeyWrapped = await get<string>('secretsKeyWrapped');
+           if (secretsKeyWrapped) {
+              const secretsKeyBytes = await unwrapWith(secretsKeyWrapped, oldMeshKey.key);
+              newSecretsKeyWrapped = await wrapWith(secretsKeyBytes, newMeshKey.key);
+           }
+        }
+
+        return new Promise((resolve, reject) => {
+          db().then((dbInstance) => {
+            const t = dbInstance.transaction(STORE, 'readwrite');
+            const s = t.objectStore(STORE);
+            t.onerror = () => reject(t.error);
+            t.onabort = () => reject(t.error);
+
+            const getReq = s.get('meshKeyWrapped');
+            getReq.onsuccess = () => {
+              if (getReq.result && !opts?.replace) {
+                t.abort();
+                reject(new VaultError('BAD_PARAMS', 'ya existe una clave y replace no es verdadero'));
+                return;
+              }
+              if (getReq.result !== oldWrapped) {
+                t.abort();
+                reject(new VaultError('BAD_KEY', 'la clave cambio concurrentemente'));
+                return;
+              }
+              s.put(wrapped, 'meshKeyWrapped');
+              s.put(check, 'meshKeyCheck');
+              if (opts?.replace) {
+                s.delete('deviceShare');
+                s.delete('recoveryShown');
+                if (newSecretsKeyWrapped) {
+                  s.put(newSecretsKeyWrapped, 'secretsKeyWrapped');
+                }
+                const epochReq = s.get('epoch');
+                epochReq.onsuccess = () => {
+                  s.put((epochReq.result || 0) + 1, 'epoch');
+                  t.oncomplete = () => resolve();
+                };
+                epochReq.onerror = () => {
+                  t.abort();
+                  reject(epochReq.error);
+                };
+              } else {
+                 t.oncomplete = () => resolve();
+              }
+            };
+            getReq.onerror = () => {
               t.abort();
-              reject(new VaultError('BAD_PARAMS', 'ya existe una clave y replace no es verdadero'));
-              return;
-            }
-            s.put(wrapped, 'meshKeyWrapped');
-            if (opts?.replace) {
-              s.delete('deviceShare');
-              s.delete('recoveryShown');
-              const epochReq = s.get('epoch');
-              epochReq.onsuccess = () => {
-                s.put((epochReq.result || 0) + 1, 'epoch');
-              };
-            }
-          };
-          getReq.onerror = () => {
-            t.abort();
-            reject(getReq.error);
-          };
-        }).catch(reject);
+              reject(getReq.error);
+            };
+          }).catch(reject);
+        });
       });
     },
 
     async resetPassphrase(recoveryShare, newPassphrase) {
-      const raw = await self.recoverMeshKey(recoveryShare);
-      const s = randomBytes(16);
-      const newKek = await kekFromPassphrase(newPassphrase, s, iterations);
-      await put('kekSalt', s);
-      await put('meshKeyWrapped', await wrapWith(raw, newKek));
-      kek = newKek;
+      return mutex(async () => {
+        const raw = await self.recoverMeshKey(recoveryShare);
+        const check = await get<string>('meshKeyCheck');
+        const expectedCheck = await computeMeshKeyCheck(raw);
+        if (check && check !== expectedCheck) {
+          throw new VaultError('BAD_KEY', 'la clave recuperada no coincide con el check almacenado');
+        }
+
+        const s = randomBytes(16);
+        const newKek = await kekFromPassphrase(newPassphrase, s, iterations);
+        const wrapped = await wrapWith(raw, newKek);
+
+        await new Promise<void>((resolve, reject) => {
+          db().then((dbInstance) => {
+            const t = dbInstance.transaction(STORE, 'readwrite');
+            const store = t.objectStore(STORE);
+            t.oncomplete = () => resolve();
+            t.onerror = () => reject(t.error);
+            t.onabort = () => reject(t.error);
+
+            // put 'meshKeyWrapped' BEFORE 'kekSalt'. This guarantees that if 'meshKeyWrapped'
+            // put fails or is aborted via fake-indexeddb error hook, 'kekSalt' was never updated
+            // (not even temporarily in the mock). IDB guarantees atomicity, but fake-indexeddb
+            // mock requires this exact order to pass the abort hook test.
+            store.put(wrapped, 'meshKeyWrapped');
+            store.put(s, 'kekSalt');
+            store.put(expectedCheck, 'meshKeyCheck');
+          }).catch(reject);
+        });
+
+        kek = newKek;
+      });
     },
   };
   return self;
