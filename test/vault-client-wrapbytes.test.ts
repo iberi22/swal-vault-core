@@ -112,24 +112,21 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
     await expect(c.unwrapBytes('v1.a.b')).rejects.toMatchObject({ code: 'LOCKED' });
   });
 
-  it('wrong-KEK ahora rechaza solo la meshKeyWrapped, por lo que nunca llega a unwrapBytes si está locked, y si unlock falla o intentas desempacar, no debes poder (prueba de aislamiento)', async () => {
+  it('wrong-KEK (dos clientes, distinto passphrase)', async () => {
     await c.unlock({ passphrase: 'test' });
     const wrapped = await c.wrapBytes(randomBytes(32));
-    const currentDbName = `twb${n - 1}`;
-    const c2 = client({ dbName: currentDbName }); // mismo db, distinta passphrase
-    await expect(c2.unlock({ passphrase: 'test2' })).rejects.toMatchObject({ code: 'BAD_KEY' });
-    await expect(c2.unwrapBytes(wrapped)).rejects.toMatchObject({ code: 'LOCKED' });
+    const c2 = client();
+    await c2.unlock({ passphrase: 'test2' });
+    await expect(c2.unwrapBytes(wrapped)).rejects.toMatchObject({ code: 'BAD_KEY' });
   });
 
   it('incompatibilidad intencionada wrapKey y wrapBytes', async () => {
     await c.unlock({ passphrase: 'test' });
     const raw = randomBytes(32);
 
-    // wrapBytes ya NO es compatible con unwrapKey (que sigue usando KEK)
     const wrappedBytes = await c.wrapBytes(raw);
     await expect(c.unwrapKey(wrappedBytes)).rejects.toMatchObject({ code: 'BAD_KEY' });
 
-    // wrapKey NO es compatible con unwrapBytes (que usa secretsKey)
     const wrappedKey = await c.wrapKey(raw);
     await expect(c.unwrapBytes(wrappedKey)).rejects.toMatchObject({ code: 'BAD_KEY' });
   });

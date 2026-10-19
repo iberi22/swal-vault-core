@@ -68,6 +68,121 @@ describe('VaultClient Reset Passphrase', () => {
     expect(await c.unwrapBytes(blob)).toEqual(secret);
   });
 
+  it('Mutant A & B: rotate -> reissue -> reset with NEW share on locked client works. Same after importMeshKey(replace)', async () => {
+    const dbName = `test-mutant-ab-${n++}`;
+    const c = client({ dbName });
+    await c.unlock({ passphrase: 'old' });
+    await c.getOrCreateMeshKey();
+
+    // Rotate -> reissue -> reset with NEW share
+    await c.rotateMeshKey();
+    const { recoveryShare: newShare1 } = await c.exportRecoveryShare({ reissue: true });
+
+    const c2 = client({ dbName });
+    await c2.resetPassphrase(newShare1, 'new');
+    await c2.unlock({ passphrase: 'new' });
+    expect(c2.isUnlocked()).toBe(true);
+
+    // importMeshKey(replace) -> reissue -> reset with NEW share
+    const raw = randomBytes(32);
+    await c2.importMeshKey(raw, { replace: true });
+    const { recoveryShare: newShare2 } = await c2.exportRecoveryShare({ reissue: true });
+
+    const c3 = client({ dbName });
+    await c3.resetPassphrase(newShare2, 'newer');
+    await c3.unlock({ passphrase: 'newer' });
+    expect(c3.isUnlocked()).toBe(true);
+  });
+
+  it('Mutant C: assert meshKeyCheck exists right after getOrCreateMeshKey without passing through unlock', async () => {
+    const dbName = `test-mutant-c-${n++}`;
+    const c = client({ dbName });
+    await c.unlock({ passphrase: 'test' });
+    await c.getOrCreateMeshKey(); // Creates meshKeyCheck
+
+    const check = await new Promise((resolve) => {
+        const r = indexedDB.open(dbName, 1);
+        r.onsuccess = () => {
+            const req = r.result.transaction('kv', 'readonly').objectStore('kv').get('meshKeyCheck');
+            req.onsuccess = (e: any) => resolve(e.target.result);
+        };
+    });
+    expect(check).toBeDefined();
+    expect(typeof check).toBe('string');
+  });
+
+  it('Mutant E & Race tests: two clients on the same dbName interleaved with subtle.digest hooks', async () => {
+    const dbName = `test-race-${n++}`;
+
+    // Simulate subtle.digest delay hook to interleave operations
+    const originalDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+    let delayDigest = false;
+
+    globalThis.crypto.subtle.digest = async function (alg, data) {
+        if (delayDigest && alg === 'SHA-256') {
+             await new Promise(r => setTimeout(r, 50));
+        }
+        return originalDigest(alg, data);
+    };
+
+    try {
+        // Race 1: getOrCreateMeshKey
+        delayDigest = true;
+        const c1 = client({ dbName });
+        const c2 = client({ dbName });
+        await c1.unlock({ passphrase: 'test' });
+        await c2.unlock({ passphrase: 'test' });
+
+        const [mk1, mk2] = await Promise.all([
+            c1.getOrCreateMeshKey(),
+            c2.getOrCreateMeshKey()
+        ]);
+        expect(mk1.raw).toEqual(mk2.raw); // Must converge to the same DB value
+
+        // Race 3: lazy check in unlock
+        delayDigest = false;
+        // manually remove meshKeyCheck to test unlock lazy race
+        await new Promise<void>((r) => {
+            const req = indexedDB.open(dbName, 1);
+            req.onsuccess = () => {
+                const t = req.result.transaction('kv', 'readwrite');
+                t.objectStore('kv').delete('meshKeyCheck');
+                t.oncomplete = () => r();
+            };
+        });
+
+        delayDigest = true;
+        const c3 = client({ dbName });
+        const c4 = client({ dbName });
+        await Promise.all([
+            c3.unlock({ passphrase: 'test' }),
+            c4.unlock({ passphrase: 'test' })
+        ]);
+
+        delayDigest = false;
+        const check = await new Promise((resolve) => {
+            const r = indexedDB.open(dbName, 1);
+            r.onsuccess = () => {
+                const req = r.result.transaction('kv', 'readonly').objectStore('kv').get('meshKeyCheck');
+                req.onsuccess = (e: any) => resolve(e.target.result);
+            };
+        });
+        expect(check).toBeDefined(); // Must be properly set without crashing
+
+        // Mutant E (Race 2): rotate without CAS
+        await c1.rotateMeshKey(); // baseline rotation
+
+        delayDigest = true;
+        const rotatePromise1 = c1.rotateMeshKey();
+        const rotatePromise2 = c2.rotateMeshKey();
+
+        await expect(Promise.all([rotatePromise1, rotatePromise2])).rejects.toThrow();
+        // One must fail with BAD_KEY (concurrent change)
+    } finally {
+        globalThis.crypto.subtle.digest = originalDigest;
+    }
+  });
+
   it('4. Rotate, reissue, then reset with OLD share on locked client gives BAD_KEY; does not touch DB', async () => {
     const dbName = `test-rot-reissue-${n++}`;
     const c = client({ dbName });
@@ -213,6 +328,16 @@ describe('VaultClient Reset Passphrase', () => {
     // Reset works
     await c2.resetPassphrase(recoveryShare, 'new');
     expect(c2.isUnlocked()).toBe(true);
+
+    // Mutant D: check exists after reset
+    const checkAfterReset = await new Promise((r) => {
+        const req = indexedDB.open(dbName, 1);
+        req.onsuccess = () => {
+            const get = req.result.transaction('kv', 'readonly').objectStore('kv').get('meshKeyCheck');
+            get.onsuccess = (e: any) => r(e.target.result);
+        };
+    });
+    expect(checkAfterReset).toBeDefined();
   });
 
   it('7. Reset does not change epoch or recoveryShown', async () => {
