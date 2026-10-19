@@ -88,17 +88,20 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
     await expect(c.unwrapBytes(parts.join('.'))).rejects.toMatchObject({ code: 'BAD_KEY' });
   });
 
-  it('string malformado falla con BAD_FORMAT', async () => {
+  it('string malformado falla con BAD_FORMAT y prueba raw DOMException nunca lanzada', async () => {
     await c.unlock({ passphrase: 'test' });
     const badStrings = [
       '',
       'v1.test',
       'v2.test.test',
       'test.test.test',
-      'v1.a.b.c'
+      'v1.a.b.c',
+      'v1.a.b',
+      'v1.!!!.AAAA'
     ];
     for (const bad of badStrings) {
       await expect(c.unwrapBytes(bad)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
+      await expect(c.unwrapKey(bad)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
     }
   });
 
@@ -128,20 +131,12 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
   });
 
   it('pins v1 envelope path sin AAD, independiente, usando subtle', async () => {
-    // 1. Setup client and unlock
-    const st = {
-      store: new Map<string, any>(),
-      get: async (k: string) => st.store.get(k),
-      put: async (k: string, v: any) => { st.store.set(k, v); }
-    };
+    const cPin = client({ dbName: 'twb-pin' });
 
-    // Create specific salt and write to indexeddb logic manually via client initialization side effect
-    // We can't easily mock IDB, so let's do real client unlock, then read salt from its internal store? No, VaultClient doesn't expose IDB.
-    // Instead we can use IDB direct access or reconstruct KEK derivation
     const subtle = globalThis.crypto.subtle;
     const s = randomBytes(16);
     // write to DB that client uses
-    const req = indexedDB.open((c as any).dbName || `twb${n-1}`, 1);
+    const req = indexedDB.open('twb-pin', 1);
     await new Promise<void>((resolve, reject) => {
       req.onupgradeneeded = () => req.result.createObjectStore('kv');
       req.onsuccess = () => {
@@ -153,9 +148,9 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
       req.onerror = () => reject(req.error);
     });
 
-    await c.unlock({ passphrase: 'pin' });
+    await cPin.unlock({ passphrase: 'pin' });
     const raw = new Uint8Array([0x11, 0x22, 0x33]);
-    const wrapped = await c.wrapBytes(raw);
+    const wrapped = await cPin.wrapBytes(raw);
 
     // derive independent KEK
     const base = await subtle.importKey('raw', bs(utf8('pin'.normalize('NFKC'))), 'PBKDF2', false, ['deriveKey']);
@@ -186,19 +181,19 @@ describe('VaultClient wrapBytes and unwrapBytes', () => {
     const newCt = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv) }, kek, bs(newRaw)));
     const newWrapped = `v1.${toBase64Url(newIv)}.${toBase64Url(newCt)}`;
 
-    expect(await c.unwrapBytes(newWrapped)).toEqual(newRaw);
+    expect(await cPin.unwrapBytes(newWrapped)).toEqual(newRaw);
 
     // Mutants that must fail
     // 1. AAD added
     const ctAAD = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(newIv), additionalData: bs(utf8('aad')) }, kek, bs(newRaw)));
     const wrappedAAD = `v1.${toBase64Url(newIv)}.${toBase64Url(ctAAD)}`;
-    await expect(c.unwrapBytes(wrappedAAD)).rejects.toMatchObject({ code: 'BAD_KEY' });
+    await expect(cPin.unwrapBytes(wrappedAAD)).rejects.toMatchObject({ code: 'BAD_KEY' });
 
     // 2. IV length 16
     const iv16 = randomBytes(16);
     const ct16 = new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: bs(iv16) }, kek, bs(newRaw)));
     const wrapped16 = `v1.${toBase64Url(iv16)}.${toBase64Url(ct16)}`;
-    await expect(c.unwrapBytes(wrapped16)).rejects.toMatchObject({ code: 'BAD_FORMAT' }); // or BAD_KEY depending on implementation, prompt asked to fail
+    await expect(cPin.unwrapBytes(wrapped16)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
   });
 
   it('salida envuelta varia entre llamadas (IV fresco), pero desenvuelve al mismo plaintext', async () => {
