@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { VaultClient, createVaultClient } from '../src/web/vault-client.js';
+import { toBase64Url } from '../src/bytes.js';
 
 let n = 0;
 const client = (dbName: string): VaultClient => createVaultClient({ storage: 'idb', dbName, pbkdf2Iterations: 310_000 });
@@ -30,9 +31,10 @@ describe('VaultClient Concurrency', () => {
 
     const origDigest = globalThis.crypto.subtle.digest;
     let didRotate = false;
-    globalThis.crypto.subtle.digest = async function(...args) {
+    globalThis.crypto.subtle.digest = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['digest']>) {
         const result = await origDigest.apply(this, args as any);
-        if (!didRotate && (args[0] as AlgorithmIdentifier) === 'SHA-256') {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!didRotate && name === 'SHA-256') {
             didRotate = true;
             await cA.unlock({ passphrase: 'p' });
             await cA.rotateMeshKey();
@@ -77,9 +79,10 @@ describe('VaultClient Concurrency', () => {
 
     const origDigest = globalThis.crypto.subtle.digest;
     let didRotate = false;
-    globalThis.crypto.subtle.digest = async function(...args) {
+    globalThis.crypto.subtle.digest = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['digest']>) {
         const result = await origDigest.apply(this, args as any);
-        if (!didRotate && (args[0] as AlgorithmIdentifier) === 'SHA-256') {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!didRotate && name === 'SHA-256') {
             didRotate = true;
             await cA.unlock({ passphrase: 'p' });
             await cA.rotateMeshKey();
@@ -157,10 +160,14 @@ describe('VaultClient Concurrency', () => {
 
     const origEncrypt = globalThis.crypto.subtle.encrypt;
     let hookUsed = false;
-    globalThis.crypto.subtle.encrypt = async function(...args) {
-        if (!hookUsed && (args[0] as AlgorithmIdentifier).name === 'AES-GCM') {
+    let pR: Promise<any>;
+    globalThis.crypto.subtle.encrypt = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['encrypt']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!hookUsed && name === 'AES-GCM') {
             hookUsed = true;
-            await cB.rotateMeshKey();
+            pR = cB.rotateMeshKey();
+            // let rotate start writing
+            await pR.catch(() => {});
         }
         return origEncrypt.apply(this, args as any);
     } as typeof globalThis.crypto.subtle.encrypt;
@@ -168,19 +175,18 @@ describe('VaultClient Concurrency', () => {
     let aResult;
     let aError;
     try {
-        aResult = await cA.wrapBytes(new Uint8Array([1, 2, 3]));
+        const pA = cA.wrapBytes(new Uint8Array([1, 2, 3]));
+        await Promise.allSettled([pA, pR!]);
+        aResult = await pA;
     } catch (e) {
         aError = e;
     } finally {
         globalThis.crypto.subtle.encrypt = origEncrypt;
     }
 
-    if (aError) {
-        expect((aError as any).code).toBe('CONFLICT');
-        expect(String((aError as any).message)).not.toMatch(/^[A-Za-z0-9_-]+={0,2}$/); // No base64url leak
-    } else {
-        expect(typeof aResult).toBe('string');
-    }
+    // wrapBytes retries the ensure step internally. We should always succeed in this test path.
+    expect(aError).toBeUndefined();
+    expect(typeof aResult).toBe('string');
 
     const cC = client(dbName);
     await cC.unlock({ passphrase: 'p' });
@@ -223,8 +229,9 @@ describe('VaultClient Concurrency', () => {
 
     const origDeriveKey = globalThis.crypto.subtle.deriveKey;
     let didRotate = false;
-    globalThis.crypto.subtle.deriveKey = async function(...args) {
-        if (!didRotate && (args[0] as AlgorithmIdentifier).name === 'PBKDF2') {
+    globalThis.crypto.subtle.deriveKey = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['deriveKey']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!didRotate && name === 'PBKDF2') {
             didRotate = true;
             await cA.rotateMeshKey();
         }
@@ -277,8 +284,9 @@ describe('VaultClient Concurrency', () => {
     const origDeriveKey = globalThis.crypto.subtle.deriveKey;
     let started = 0;
     let pR2: Promise<void>;
-    globalThis.crypto.subtle.deriveKey = async function(...args) {
-        if ((args[0] as AlgorithmIdentifier).name === 'PBKDF2') {
+    globalThis.crypto.subtle.deriveKey = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['deriveKey']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (name === 'PBKDF2') {
             started++;
             if (started === 1) {
                 pR2 = cR2.resetPassphrase(recoveryShare, 'p2');
@@ -334,8 +342,9 @@ describe('VaultClient Concurrency', () => {
 
     const origDeriveKey = globalThis.crypto.subtle.deriveKey;
     let didReissue = false;
-    globalThis.crypto.subtle.deriveKey = async function(...args) {
-        if (!didReissue && (args[0] as AlgorithmIdentifier).name === 'PBKDF2') {
+    globalThis.crypto.subtle.deriveKey = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['deriveKey']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!didReissue && name === 'PBKDF2') {
             didReissue = true;
             await cA.exportRecoveryShare({ reissue: true });
         }
@@ -392,8 +401,9 @@ describe('VaultClient Concurrency', () => {
 
     const origDeriveKey = globalThis.crypto.subtle.deriveKey;
     let didUnlock = false;
-    globalThis.crypto.subtle.deriveKey = async function(...args) {
-        if (!didUnlock && (args[0] as AlgorithmIdentifier).name === 'PBKDF2') {
+    globalThis.crypto.subtle.deriveKey = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['deriveKey']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!didUnlock && name === 'PBKDF2') {
             didUnlock = true;
             await cA.unlock({ passphrase: 'old' });
         }
@@ -535,7 +545,137 @@ describe('VaultClient Concurrency', () => {
     expect(mkwAfter).toBe(mkwBefore);
   });
 
-  it('12. No key bytes in errors check', () => {
-      // Checked inline in test 4, 6, 11
+  it('12. No key bytes in errors check and CONFLICT rejections', async () => {
+    const dbName = `cc12-${n++}`;
+    const c1 = client(dbName);
+    await c1.unlock({ passphrase: 'old' });
+    const mk = await c1.getOrCreateMeshKey();
+    const { recoveryShare } = await c1.exportRecoveryShare();
+
+    // Simulate bad share with secret key base64
+    const badShare = { index: 2, value: recoveryShare.value + 'X' };
+
+    const cR = client(dbName);
+    let resetError;
+    try {
+        await cR.resetPassphrase(badShare, 'new');
+    } catch (e) {
+        resetError = e;
+    }
+
+    expect(resetError).toBeDefined();
+    const errMsg = String((resetError as Error).message);
+
+    const mkB64 = toBase64Url(mk.raw);
+    expect(errMsg).not.toContain(mkB64);
+    expect(errMsg).not.toContain(recoveryShare.value);
+
+    // Add one test each for the CONFLICT code in rotate, import and export
+    // to ensure a mutant reverting them to BAD_KEY dies.
+    const origWrapWith = globalThis.crypto.subtle.encrypt;
+    let hookUsed = false;
+    globalThis.crypto.subtle.encrypt = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['encrypt']>) {
+        const name = typeof args[0] === 'object' ? args[0].name : args[0];
+        if (!hookUsed && name === 'AES-GCM') {
+            hookUsed = true;
+            // Corrupt the IDB state to trigger CONFLICT
+            await new Promise<void>((resolve, reject) => {
+              const req = indexedDB.open(dbName, 1);
+              req.onsuccess = () => {
+                  const db = req.result;
+                  const tx = db.transaction('kv', 'readwrite');
+                  tx.objectStore('kv').put('stale_data', 'meshKeyWrapped');
+                  tx.oncomplete = () => resolve();
+              };
+              req.onerror = () => reject(req.error);
+            });
+        }
+        return origWrapWith.apply(this, args as any);
+    } as typeof globalThis.crypto.subtle.encrypt;
+
+    try {
+        const pR = c1.rotateMeshKey();
+        await expect(pR).rejects.toMatchObject({ code: 'CONFLICT' });
+    } finally {
+        globalThis.crypto.subtle.encrypt = origWrapWith;
+    }
+
+    // Restore valid state for next hook tests
+    const wrapped1 = await c1.wrapKey(mk.raw);
+    await new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open(dbName, 1);
+        req.onsuccess = () => {
+            const db = req.result;
+            const tx = db.transaction('kv', 'readwrite');
+            tx.objectStore('kv').put(wrapped1, 'meshKeyWrapped'); // Fake a valid wrapped back
+            tx.oncomplete = () => resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+
+    const origUnwrap = globalThis.crypto.subtle.decrypt;
+    hookUsed = false;
+    globalThis.crypto.subtle.decrypt = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['decrypt']>) {
+        if (!hookUsed) {
+            hookUsed = true;
+            await new Promise<void>((resolve, reject) => {
+              const req = indexedDB.open(dbName, 1);
+              req.onsuccess = () => {
+                  const db = req.result;
+                  const tx = db.transaction('kv', 'readwrite');
+                  tx.objectStore('kv').put('stale_data2', 'meshKeyWrapped');
+                  tx.oncomplete = () => resolve();
+              };
+              req.onerror = () => reject(req.error);
+            });
+        }
+        return origUnwrap.apply(this, args as any);
+    } as typeof globalThis.crypto.subtle.decrypt;
+
+    try {
+        const pE = c1.exportRecoveryShare();
+        await expect(pE).rejects.toMatchObject({ code: 'CONFLICT' });
+    } finally {
+        globalThis.crypto.subtle.decrypt = origUnwrap;
+    }
+
+    // Restore state
+    const wrapped2 = await c1.wrapKey(mk.raw);
+    await new Promise<void>((resolve, reject) => {
+        const req = indexedDB.open(dbName, 1);
+        req.onsuccess = () => {
+            const db = req.result;
+            const tx = db.transaction('kv', 'readwrite');
+            tx.objectStore('kv').put(wrapped2, 'meshKeyWrapped');
+            tx.oncomplete = () => resolve();
+        };
+        req.onerror = () => reject(req.error);
+    });
+
+    const origEncryptI = globalThis.crypto.subtle.encrypt;
+    let hookUsedI = false;
+    globalThis.crypto.subtle.encrypt = async function(this: SubtleCrypto, ...args: Parameters<SubtleCrypto['encrypt']>) {
+        if (!hookUsedI) {
+            hookUsedI = true;
+            await new Promise<void>((resolve, reject) => {
+              const req = indexedDB.open(dbName, 1);
+              req.onsuccess = () => {
+                  const db = req.result;
+                  const tx = db.transaction('kv', 'readwrite');
+                  tx.objectStore('kv').put('stale_data3', 'meshKeyWrapped');
+                  tx.oncomplete = () => resolve();
+              };
+              req.onerror = () => reject(req.error);
+            });
+        }
+        return origEncryptI.apply(this, args as any);
+    } as typeof globalThis.crypto.subtle.encrypt;
+
+    try {
+        const pI = c1.importMeshKey(mk.raw, { replace: true });
+        await expect(pI).rejects.toMatchObject({ code: 'CONFLICT' });
+    } finally {
+        globalThis.crypto.subtle.encrypt = origEncryptI;
+    }
   });
 });

@@ -609,7 +609,7 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
           }
         }
 
-        return new Promise((resolve, reject) => {
+        return new Promise<{raw: Uint8Array, epoch: number}>((resolve, reject) => {
           db().then((dbInstance) => {
             const t = dbInstance.transaction(STORE, 'readwrite');
             const s = t.objectStore(STORE);
