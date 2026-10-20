@@ -183,7 +183,7 @@ describe('VaultClient Reset Passphrase', () => {
     }
   });
 
-  it('Judge PoC: resetPassphrase concurrent rotation from another tab reverts BAD_KEY', async () => {
+  it('Judge PoC: resetPassphrase concurrent rotation from another tab reverts CONFLICT', async () => {
      const dbName = `test-reset-rot-${n++}`;
      const c1 = client({ dbName });
      await c1.unlock({ passphrase: 'old' });
@@ -208,7 +208,7 @@ describe('VaultClient Reset Passphrase', () => {
 
      try {
          isResetting = true;
-         await expect(c2.resetPassphrase(recoveryShare, 'new')).rejects.toMatchObject({ code: 'BAD_KEY' });
+         await expect(c2.resetPassphrase(recoveryShare, 'new')).rejects.toMatchObject({ code: 'CONFLICT' });
      } finally {
          globalThis.crypto.subtle.deriveKey = originalDeriveKey;
          isResetting = false;
