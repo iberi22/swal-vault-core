@@ -799,15 +799,46 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
 
     async resetPassphrase(recoveryShare, newPassphrase) {
       return mutex(async () => {
-        const raw = await self.recoverMeshKey(recoveryShare);
-        const check = await get<string>('meshKeyCheck');
-        const expectedCheck = await computeMeshKeyCheck(raw);
-        if (check && check !== expectedCheck) {
-          throw new VaultError('BAD_KEY', 'la clave recuperada no coincide con el check almacenado');
+        const [preDeviceShare, preMeshKeyWrapped, preMeshKeyCheck] = await new Promise<[DEKShare | undefined, string | undefined, string | undefined]>((resolve, reject) => {
+          db().then((dbInstance) => {
+             const t = dbInstance.transaction(STORE, 'readonly');
+             const s = t.objectStore(STORE);
+             let ds: DEKShare | undefined;
+             let mkw: string | undefined;
+             let mkc: string | undefined;
+             const r1 = s.get('deviceShare');
+             r1.onsuccess = () => {
+                ds = r1.result;
+                const r2 = s.get('meshKeyWrapped');
+                r2.onsuccess = () => {
+                   mkw = r2.result;
+                   const r3 = s.get('meshKeyCheck');
+                   r3.onsuccess = () => {
+                      mkc = r3.result;
+                      resolve([ds, mkw, mkc]);
+                   };
+                   r3.onerror = () => reject(r3.error);
+                };
+                r2.onerror = () => reject(r2.error);
+             };
+             r1.onerror = () => reject(r1.error);
+          }).catch(reject);
+        });
+
+        if (!preDeviceShare) throw new VaultError('NO_MESH_KEY', 'no hay share de dispositivo');
+        if (!recoveryShare || typeof recoveryShare.value !== 'string') throw new VaultError('BAD_FORMAT', 'los shares deben contener un valor string');
+
+        let raw: Uint8Array;
+        try {
+          raw = reconstructDEK([preDeviceShare, recoveryShare]);
+        } catch {
+          throw new VaultError('BAD_FORMAT', 'formato de share invalido al reconstruir la clave');
         }
 
-        const preDeviceShare = await get<DEKShare>('deviceShare');
-        const preMeshKeyWrapped = await get<string>('meshKeyWrapped');
+        const expectedCheck = await computeMeshKeyCheck(raw);
+        if (preMeshKeyCheck && preMeshKeyCheck !== expectedCheck) {
+          throw new VaultError('BAD_KEY', 'la clave recuperada no coincide con el check almacenado');
+        }
 
         const s = randomBytes(16);
         const newKek = await kekFromPassphrase(newPassphrase, s, iterations);
@@ -821,37 +852,49 @@ export function createVaultClient(opts: VaultClientOptions): VaultClient {
             t.onerror = () => reject(t.error);
             t.onabort = () => reject(t.error);
 
-            const checkReq = store.get('meshKeyWrapped');
-            checkReq.onsuccess = () => {
-              if (checkReq.result !== preMeshKeyWrapped) {
+            const mkwReq = store.get('meshKeyWrapped');
+            mkwReq.onsuccess = () => {
+              if (mkwReq.result !== preMeshKeyWrapped) {
                  t.abort();
                  reject(new VaultError('BAD_KEY', 'la clave cambio concurrentemente'));
                  return;
               }
               const devReq = store.get('deviceShare');
               devReq.onsuccess = () => {
-                 if (devReq.result?.value !== preDeviceShare?.value) {
+                 if (devReq.result?.value !== preDeviceShare.value) {
                     t.abort();
                     reject(new VaultError('BAD_KEY', 'el device share cambio concurrentemente'));
                     return;
                  }
-                 try {
-                   store.put(wrapped, 'meshKeyWrapped');
-                   store.put(s, 'kekSalt');
-                   store.put(expectedCheck, 'meshKeyCheck');
-                 } catch (e) {
-                   t.abort();
-                   reject(e);
-                 }
+                 const chkReq = store.get('meshKeyCheck');
+                 chkReq.onsuccess = () => {
+                    if (chkReq.result !== preMeshKeyCheck) {
+                        t.abort();
+                        reject(new VaultError('BAD_KEY', 'el check cambio concurrentemente'));
+                        return;
+                    }
+                    try {
+                      store.put(wrapped, 'meshKeyWrapped');
+                      store.put(s, 'kekSalt');
+                      store.put(expectedCheck, 'meshKeyCheck');
+                    } catch (e) {
+                      t.abort();
+                      reject(e);
+                    }
+                 };
+                 chkReq.onerror = () => {
+                    t.abort();
+                    reject(chkReq.error);
+                 };
               };
               devReq.onerror = () => {
                  t.abort();
                  reject(devReq.error);
               };
             };
-            checkReq.onerror = () => {
+            mkwReq.onerror = () => {
                t.abort();
-               reject(checkReq.error);
+               reject(mkwReq.error);
             };
           }).catch(reject);
         });

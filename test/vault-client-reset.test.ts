@@ -183,6 +183,42 @@ describe('VaultClient Reset Passphrase', () => {
     }
   });
 
+  it('Judge PoC: resetPassphrase concurrent rotation from another tab reverts BAD_KEY', async () => {
+     const dbName = `test-reset-rot-${n++}`;
+     const c1 = client({ dbName });
+     await c1.unlock({ passphrase: 'old' });
+     const mk = await c1.getOrCreateMeshKey();
+     const rawBlobData = new Uint8Array([0x55, 0x66, 0x77]);
+     const blob = await c1.wrapBytes(rawBlobData);
+     const { recoveryShare } = await c1.exportRecoveryShare();
+
+     const c2 = client({ dbName });
+
+     // We mock subtle.deriveKey to stall resetPassphrase between the initial read and the final write
+     const originalDeriveKey = globalThis.crypto.subtle.deriveKey.bind(globalThis.crypto.subtle);
+     let isResetting = false;
+
+     globalThis.crypto.subtle.deriveKey = async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
+         if (isResetting && (algorithm as any).name === 'PBKDF2') {
+             // In the middle of resetPassphrase deriving new KEK, another client rotates the key
+             await c1.rotateMeshKey();
+         }
+         return originalDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
+     };
+
+     try {
+         isResetting = true;
+         await expect(c2.resetPassphrase(recoveryShare, 'new')).rejects.toMatchObject({ code: 'BAD_KEY' });
+     } finally {
+         globalThis.crypto.subtle.deriveKey = originalDeriveKey;
+         isResetting = false;
+     }
+
+     // Now check that blob can still be unwrapBytes by c1
+     const unwrap = await c1.unwrapBytes(blob);
+     expect(unwrap).toEqual(rawBlobData);
+  });
+
   it('4. Rotate, reissue, then reset with OLD share on locked client gives BAD_KEY; does not touch DB', async () => {
     const dbName = `test-rot-reissue-${n++}`;
     const c = client({ dbName });
@@ -412,6 +448,21 @@ describe('VaultClient Reset Passphrase', () => {
     });
     expect(skw).toBeDefined();
     expect(skw.startsWith('v1.')).toBe(true);
+  });
+
+  it('recoverMeshKey fails properly with BAD_FORMAT when recovery share is empty or malformed', async () => {
+    const dbName = `test-bad-rec-${n++}`;
+    const c = client({ dbName });
+    await c.unlock({ passphrase: 'test' });
+    await c.getOrCreateMeshKey();
+
+    // Export device share to ensure the error doesn't hit the NO_MESH_KEY check
+    await c.exportRecoveryShare();
+
+    // Call recoverMeshKey with bad shares
+    await expect(c.recoverMeshKey(null as any)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
+    await expect(c.recoverMeshKey({ index: 2, value: 123 } as any)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
+    await expect(c.recoverMeshKey({ index: 2, value: 'invalid_share_value' } as any)).rejects.toMatchObject({ code: 'BAD_FORMAT' });
   });
 
   it('10. unwrapBytes(wrapKey) gives BAD_KEY; unwrapKey(wrapBytes) gives BAD_KEY; locked vault gives LOCKED', async () => {
