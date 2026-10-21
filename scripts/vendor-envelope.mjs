@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -65,6 +65,12 @@ if (check) {
   if (!src) fail('cannot read source envelope version');
   const have = versionOf(dest);
   if (have && cmp(src, have) < 0) fail(`refusing to vendor older ${src.join('.')} over newer ${have.join('.')}`);
+  // Refuse any dest equal to, inside, or containing a managed dir (would delete the source tree).
+  const overlaps = (a, b) => { const r = relative(a, b); return r === '' || (r !== '..' && !r.startsWith('..' + sep) && !isAbsolute(r)); };
+  for (const d of DIRS) {
+    const managed = join(ROOT, d);
+    if (overlaps(dest, managed) || overlaps(managed, dest)) fail(`refusing to vendor into ${dest}: overlaps source ${managed}`);
+  }
   for (const d of DIRS) {
     rmSync(join(dest, d), { recursive: true, force: true });
     mkdirSync(join(dest, d), { recursive: true });

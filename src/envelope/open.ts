@@ -3,13 +3,12 @@ import { jcs } from './jcs.js';
 import {
   PW_ITER_MAX, PW_ITER_MIN, aesGcmDecrypt, codeKek, grpKek, grpKid, pbkdf2Kek,
 } from './kdf.js';
-import { MAX_FILE_BYTES, MAX_RCPT, headerOf, signingInput, wrapAad } from './seal.js';
+import { MAX_FILE_BYTES, MAX_INFLATED, checkCrit } from './limits.js';
+import { MAX_RCPT, headerOf, signingInput, wrapAad } from './seal.js';
 import { EnvelopeError, type Envelope, type OpenOptions, type OpenResult, type OtherRecipient } from './types.js';
 import { ENVELOPE_FMT } from './version.js';
 
 const enc = new TextEncoder();
-const KNOWN_CRIT = new Set<string>();
-const MAX_INFLATED = 4 * MAX_FILE_BYTES;
 
 function isObj(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
@@ -60,8 +59,7 @@ function validate(e: Envelope): void {
   if (typeof e.created !== 'string') throw new EnvelopeError('format', 'created');
   if (e.seq !== undefined && !(Number.isSafeInteger(e.seq) && e.seq >= 0)) throw new EnvelopeError('format', 'seq');
   if (e.crit !== undefined) {
-    if (!Array.isArray(e.crit) || e.crit.some((c) => typeof c !== 'string')) throw new EnvelopeError('format', 'crit');
-    if (e.crit.some((c) => !KNOWN_CRIT.has(c))) throw new EnvelopeError('unsupported', 'unknown crit entry');
+    checkCrit(e.crit);
   }
   if (e.aead !== 'A256GCM') throw new EnvelopeError('unsupported', 'aead');
   fixed(e.iv, 12, 'iv');
