@@ -1,0 +1,236 @@
+{
+  "format": "swal-env/1",
+  "version": "1.0.0",
+  "fixed": {
+    "cekHex": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "ivHex": "1e1e1e1e1e1e1e1e1e1e1e1e"
+  },
+  "inputs": {
+    "app": "fize",
+    "ns": "app/fize/instance/vec-1",
+    "schema": "swal-inventory-export@1",
+    "created": "2026-10-21T15:00:00.000Z",
+    "payload": "{\"items\":[{\"sku\":\"A1\",\"qty\":3}],\"ñ\":\"vector\"}",
+    "passphrase": "correct horse battery",
+    "codeHex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+  },
+  "positive": [
+    {
+      "name": "pw",
+      "recipients": [
+        {
+          "t": "pw",
+          "saltHex": "11111111111111111111111111111111",
+          "ivHex": "111111111111111111111111"
+        }
+      ],
+      "credentials": {
+        "passphrase": "correct horse battery"
+      },
+      "envelope": {
+        "fmt": "swal-env/1",
+        "app": "fize",
+        "ns": "app/fize/instance/vec-1",
+        "schema": "swal-inventory-export@1",
+        "created": "2026-10-21T15:00:00.000Z",
+        "aead": "A256GCM",
+        "iv": "Hh4eHh4eHh4eHh4e",
+        "rcpt": [
+          {
+            "t": "pw",
+            "kdf": "PBKDF2-SHA256",
+            "i": 600000,
+            "salt": "EREREREREREREREREREREQ",
+            "iv": "ERERERERERERERER",
+            "wk": "G4SHwwoikYlgt3JVzwegCiaicKv7noJLsUADTyMiVRXJiZz6LUbw-dyRANE1i-cU"
+          }
+        ],
+        "ct": "5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP04048p51x64zXHvPuQHsmWk"
+      }
+    },
+    {
+      "name": "code",
+      "recipients": [
+        {
+          "t": "code",
+          "saltHex": "22222222222222222222222222222222",
+          "ivHex": "222222222222222222222222"
+        }
+      ],
+      "credentials": {
+        "codeHex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      },
+      "envelope": {
+        "fmt": "swal-env/1",
+        "app": "fize",
+        "ns": "app/fize/instance/vec-1",
+        "schema": "swal-inventory-export@1",
+        "created": "2026-10-21T15:00:00.000Z",
+        "aead": "A256GCM",
+        "iv": "Hh4eHh4eHh4eHh4e",
+        "rcpt": [
+          {
+            "t": "code",
+            "salt": "IiIiIiIiIiIiIiIiIiIiIg",
+            "iv": "IiIiIiIiIiIiIiIi",
+            "wk": "CgOgOigQca1c-6zA6ZMSjD74r5tWY2IH934TSVJhJjeUABsmaZeVgdSNlB-AYIbH"
+          }
+        ],
+        "ct": "5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09D0lxcvC_CfaC4muAjVqg8"
+      }
+    },
+    {
+      "name": "grp",
+      "recipients": [
+        {
+          "t": "grp",
+          "epoch": 3,
+          "saltHex": "33333333333333333333333333333333",
+          "ivHex": "333333333333333333333333"
+        }
+      ],
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "envelope": {
+        "fmt": "swal-env/1",
+        "app": "fize",
+        "ns": "app/fize/instance/vec-1",
+        "schema": "swal-inventory-export@1",
+        "created": "2026-10-21T15:00:00.000Z",
+        "aead": "A256GCM",
+        "iv": "Hh4eHh4eHh4eHh4e",
+        "rcpt": [
+          {
+            "t": "grp",
+            "kid": "yg2vDYTL6HWQmxMTcE5hxA",
+            "epoch": 3,
+            "salt": "MzMzMzMzMzMzMzMzMzMzMw",
+            "iv": "MzMzMzMzMzMzMzMz",
+            "wk": "52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h"
+          }
+        ],
+        "ct": "5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Y8"
+      }
+    },
+    {
+      "name": "gzip",
+      "gzip": true,
+      "recipients": [
+        {
+          "t": "grp",
+          "epoch": 3,
+          "saltHex": "44444444444444444444444444444444",
+          "ivHex": "444444444444444444444444"
+        }
+      ],
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "envelope": {
+        "fmt": "swal-env/1",
+        "app": "fize",
+        "ns": "app/fize/instance/vec-1",
+        "schema": "swal-inventory-export@1",
+        "created": "2026-10-21T15:00:00.000Z",
+        "aead": "A256GCM",
+        "iv": "Hh4eHh4eHh4eHh4e",
+        "z": "gzip",
+        "rcpt": [
+          {
+            "t": "grp",
+            "kid": "yg2vDYTL6HWQmxMTcE5hxA",
+            "epoch": 3,
+            "salt": "RERERERERERERERERERERA",
+            "iv": "RERERERERERERERE",
+            "wk": "N60P5sqTqyaaScKL7XrIq37jR09x3idsrQgXmyq9jgTREKYGxSN_dBnnHlJcEZ61"
+          }
+        ],
+        "ct": "gJpN5yTlkoa7eWXKHdMOK5u57Wq80NS3BEhNFxUCKpsMsQHL9UBCDUFnwEQRv8pjA73zaMelpbLrKsjhxr2iSSva4y0L2VRDWwDcI_xQ-FsX"
+      }
+    }
+  ],
+  "negative": [
+    {
+      "name": "tampered-header-byte",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hx4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"grp\",\"kid\":\"yg2vDYTL6HWQmxMTcE5hxA\",\"epoch\":3,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw\",\"iv\":\"MzMzMzMzMzMzMzMz\",\"wk\":\"52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Y8\"}",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "tampered"
+    },
+    {
+      "name": "tampered-ct",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"grp\",\"kid\":\"yg2vDYTL6HWQmxMTcE5hxA\",\"epoch\":3,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw\",\"iv\":\"MzMzMzMzMzMzMzMz\",\"wk\":\"52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h\"}],\"ct\":\"5TMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Y8\"}",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "tampered"
+    },
+    {
+      "name": "wrong-passphrase",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"pw\",\"kdf\":\"PBKDF2-SHA256\",\"i\":600000,\"salt\":\"EREREREREREREREREREREQ\",\"iv\":\"ERERERERERERERER\",\"wk\":\"G4SHwwoikYlgt3JVzwegCiaicKv7noJLsUADTyMiVRXJiZz6LUbw-dyRANE1i-cU\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP04048p51x64zXHvPuQHsmWk\"}",
+      "credentials": {
+        "passphrase": "wrong passphrase here"
+      },
+      "expect": "key"
+    },
+    {
+      "name": "i-below-bound",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"pw\",\"kdf\":\"PBKDF2-SHA256\",\"i\":1000,\"salt\":\"EREREREREREREREREREREQ\",\"iv\":\"ERERERERERERERER\",\"wk\":\"G4SHwwoikYlgt3JVzwegCiaicKv7noJLsUADTyMiVRXJiZz6LUbw-dyRANE1i-cU\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP04048p51x64zXHvPuQHsmWk\"}",
+      "credentials": {
+        "passphrase": "correct horse battery"
+      },
+      "expect": "format"
+    },
+    {
+      "name": "i-above-bound",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"pw\",\"kdf\":\"PBKDF2-SHA256\",\"i\":20000000,\"salt\":\"EREREREREREREREREREREQ\",\"iv\":\"ERERERERERERERER\",\"wk\":\"G4SHwwoikYlgt3JVzwegCiaicKv7noJLsUADTyMiVRXJiZz6LUbw-dyRANE1i-cU\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP04048p51x64zXHvPuQHsmWk\"}",
+      "credentials": {
+        "passphrase": "correct horse battery"
+      },
+      "expect": "format"
+    },
+    {
+      "name": "unknown-fmt",
+      "input": "{\"fmt\":\"swal-env/2\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"grp\",\"kid\":\"yg2vDYTL6HWQmxMTcE5hxA\",\"epoch\":3,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw\",\"iv\":\"MzMzMzMzMzMzMzMz\",\"wk\":\"52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Y8\"}",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "unsupported"
+    },
+    {
+      "name": "unknown-crit",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"grp\",\"kid\":\"yg2vDYTL6HWQmxMTcE5hxA\",\"epoch\":3,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw\",\"iv\":\"MzMzMzMzMzMzMzMz\",\"wk\":\"52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Y8\",\"crit\":[\"future-ext\"]}",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "unsupported"
+    },
+    {
+      "name": "argon2id-reserved",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"pw\",\"kdf\":\"argon2id\",\"i\":600000,\"salt\":\"EREREREREREREREREREREQ\",\"iv\":\"ERERERERERERERER\",\"wk\":\"G4SHwwoikYlgt3JVzwegCiaicKv7noJLsUADTyMiVRXJiZz6LUbw-dyRANE1i-cU\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP04048p51x64zXHvPuQHsmWk\"}",
+      "credentials": {
+        "passphrase": "correct horse battery"
+      },
+      "expect": "unsupported"
+    },
+    {
+      "name": "truncated-tag",
+      "input": "{\"fmt\":\"swal-env/1\",\"app\":\"fize\",\"ns\":\"app/fize/instance/vec-1\",\"schema\":\"swal-inventory-export@1\",\"created\":\"2026-10-21T15:00:00.000Z\",\"aead\":\"A256GCM\",\"iv\":\"Hh4eHh4eHh4eHh4e\",\"rcpt\":[{\"t\":\"grp\",\"kid\":\"yg2vDYTL6HWQmxMTcE5hxA\",\"epoch\":3,\"salt\":\"MzMzMzMzMzMzMzMzMzMzMw\",\"iv\":\"MzMzMzMzMzMzMzMz\",\"wk\":\"52D-kneMZaRCsFNGbnaaZtvFcqUl5uGvqRoFwpVDxYMUdL_M3wFz_S0yTaaWIY1h\"}],\"ct\":\"5DMsk0GI4aSBIbW-pJQyxIzNHtEwqtwIXmTdf1RLI2V_WJxAm9AGxq_G_gyP09pSMGVhZ34vT4N2BeRT_Q\"}",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "tampered"
+    },
+    {
+      "name": "oversize",
+      "gen": "oversize",
+      "credentials": {
+        "groupKeyHex": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c"
+      },
+      "expect": "too-large"
+    }
+  ]
+}
