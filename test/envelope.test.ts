@@ -5,6 +5,8 @@ import {
   jcs, openEnvelope, sealEnvelope, serializeEnvelope,
   type Envelope, type KemRecipientProvider, type OpenOptions, type SignatureProvider, type SealOptions,
 } from '../src/envelope/index.js';
+import * as envelopeApi from '../src/envelope/index.js';
+import { sealWithFixedParams } from '../src/envelope/seal.js';
 
 const V = JSON.parse(readFileSync(new URL('./vectors/swal-env-1.json', import.meta.url), 'utf8'));
 const hex = (h: string) => Uint8Array.from(h.match(/../g) ?? [], (x) => parseInt(x, 16));
@@ -47,24 +49,27 @@ describe('vectors: positive', () => {
       expect(dec.decode(r.payload)).toBe(V.inputs.payload);
       expect(r.header.schema).toBe(V.inputs.schema);
       if (!p.gzip) {
-        const again = await sealEnvelope(sealOpts(p));
+        const again = await sealWithFixedParams(...sealOpts(p));
         expect(again).toEqual(p.envelope);
       }
     });
   }
 });
 
-function sealOpts(p: any): SealOptions {
+function sealOpts(p: any): [SealOptions, Parameters<typeof sealWithFixedParams>[1]] {
   const i = V.inputs;
   const recipients = p.recipients.map((r: any) => {
-    if (r.t === 'pw') return { t: 'pw', passphrase: i.passphrase, salt: hex(r.saltHex), iv: hex(r.ivHex) };
-    if (r.t === 'code') return { t: 'code', secret: hex(i.codeHex), salt: hex(r.saltHex), iv: hex(r.ivHex) };
-    return { t: 'grp', groupKey: hex(i.groupKeyHex), epoch: r.epoch, salt: hex(r.saltHex), iv: hex(r.ivHex) };
+    if (r.t === 'pw') return { t: 'pw', passphrase: i.passphrase };
+    if (r.t === 'code') return { t: 'code', secret: hex(i.codeHex) };
+    return { t: 'grp', groupKey: hex(i.groupKeyHex), epoch: r.epoch };
   });
-  return {
+  return [{
     app: i.app, ns: i.ns, schema: i.schema, created: i.created, payload: enc.encode(i.payload),
-    recipients, compress: p.gzip ? 'gzip' : undefined, fixed: { cek: hex(V.fixed.cekHex), iv: hex(V.fixed.ivHex) },
-  };
+    recipients, compress: p.gzip ? 'gzip' : undefined,
+  }, {
+    cek: hex(V.fixed.cekHex), iv: hex(V.fixed.ivHex),
+    recipients: p.recipients.map((r: any) => ({ salt: hex(r.saltHex), iv: hex(r.ivHex) })),
+  }];
 }
 
 describe('vectors: negative', () => {
@@ -161,5 +166,58 @@ describe('behaviour', () => {
     // ct swap after signing is detected by the signature before decryption
     const t2 = { ...env, ct: (await sealEnvelope({ ...base, recipients: [{ t: 'grp', groupKey: gk, epoch: 1 }] })).ct };
     expect(await codeOf(openEnvelope(JSON.stringify(t2), { kem, verifier: signer }))).toBe('signature');
+  });
+
+  it('two identical seals differ in iv, ct, salt, wrap iv and wk (pw, code, grp)', async () => {
+    const opts = {
+      ...base,
+      recipients: [
+        { t: 'pw' as const, passphrase: 'correct horse battery' },
+        { t: 'code' as const, secret: new Uint8Array(16).fill(3) },
+        { t: 'grp' as const, groupKey: gk, epoch: 1 },
+      ],
+    };
+    const a: any = await sealEnvelope(opts);
+    const b: any = await sealEnvelope(opts);
+    expect(a.iv).not.toBe(b.iv);
+    expect(a.ct).not.toBe(b.ct);
+    for (let i = 0; i < 3; i++) {
+      expect(a.rcpt[i].salt).not.toBe(b.rcpt[i].salt);
+      expect(a.rcpt[i].iv).not.toBe(b.rcpt[i].iv);
+      expect(a.rcpt[i].wk).not.toBe(b.rcpt[i].wk); // random CEK => different wrapped key
+    }
+  });
+  it('requireSignature + sig present but no verifier -> signature', async () => {
+    const signer: SignatureProvider = {
+      async sign() { return { alg: 'X', kid: 'k', v: 'AAAA' }; },
+      async verify() { return true; },
+    };
+    const env = await sealEnvelope({ ...base, recipients: [{ t: 'grp', groupKey: gk, epoch: 1 }], signer });
+    expect(env.sig).toBeDefined();
+    expect(await codeOf(openEnvelope(serializeEnvelope(env), { groupKeys: [gk], requireSignature: true }))).toBe('signature');
+    expect((await openEnvelope(serializeEnvelope(env), { groupKeys: [gk] })).signatureVerified).toBe(false);
+  });
+  it('fixed/salt/iv test params are not public API', async () => {
+    expect(Object.keys(envelopeApi)).not.toContain('sealWithFixedParams');
+    const fixedOpts: any = { cek: new Uint8Array(32), iv: new Uint8Array(12) };
+    const rec: any = { t: 'grp', groupKey: gk, epoch: 1, salt: new Uint8Array(16), iv: new Uint8Array(12) };
+    // @ts-expect-error `fixed` is not part of SealOptions
+    const a = await sealEnvelope({ ...base, recipients: [rec], fixed: fixedOpts });
+    const b = await sealEnvelope({ ...base, recipients: [rec], fixed: fixedOpts } as SealOptions);
+    expect(a.iv).not.toBe(b.iv);
+    expect(a.iv).not.toBe(b64uEncode(new Uint8Array(12)));
+    expect((a.rcpt[0] as any).salt).not.toBe((b.rcpt[0] as any).salt);
+    expect((a.rcpt[0] as any).salt).not.toBe(b64uEncode(new Uint8Array(16)));
+  });
+  it('unknown pw kdf on one recipient is skipped when another recipient opens', async () => {
+    const withFuture = await sealWithFixedParams(
+      { ...base, recipients: [{ t: 'grp', groupKey: gk, epoch: 1 }], created: '2026-01-01T00:00:00.000Z' },
+      { cek: new Uint8Array(32).fill(1), iv: new Uint8Array(12).fill(2), extraRcpt: [{ t: 'pw', kdf: 'argon2id', i: 3, salt: 'x', iv: 'y', wk: 'z' }] },
+    );
+    expect(withFuture.rcpt[0].t).toBe('pw');
+    const r = await openEnvelope(serializeEnvelope(withFuture), { groupKeys: [gk], passphrase: 'correct horse battery' });
+    expect(dec.decode(r.payload)).toBe('hola');
+    expect(r.via).toBe('grp');
+    expect(await codeOf(openEnvelope(serializeEnvelope(withFuture), { passphrase: 'correct horse battery' }))).toBe('unsupported');
   });
 });

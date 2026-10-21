@@ -71,7 +71,7 @@ function validate(e: Envelope): void {
   for (const r of e.rcpt) {
     if (!isObj(r) || typeof r.t !== 'string') throw new EnvelopeError('format', 'rcpt entry');
     if (r.t === 'pw') {
-      if (r.kdf !== 'PBKDF2-SHA256') throw new EnvelopeError('unsupported', 'kdf'); // incl. reserved argon2id
+      if (r.kdf !== 'PBKDF2-SHA256') continue; // unknown kdf (e.g. reserved argon2id): skipped; see tryUnwrap
       if (!Number.isInteger(r.i) || (r.i as number) < PW_ITER_MIN || (r.i as number) > PW_ITER_MAX) throw new EnvelopeError('format', 'i out of bounds');
     }
     if (r.t === 'pw' || r.t === 'code' || r.t === 'grp') {
@@ -94,6 +94,7 @@ async function tryUnwrap(e: Envelope, o: OpenOptions): Promise<{ cek: Uint8Array
       const aad = wrapAad(r.t, e);
       const dw = async (kek: Uint8Array) =>
         aesGcmDecrypt(kek, b64uDecode(r.iv), b64uDecode(r.wk), aad);
+      if (r.t === 'pw' && r.kdf !== 'PBKDF2-SHA256') continue;
       if (r.t === 'pw' && o.passphrase !== undefined) {
         return { cek: await dw(await pbkdf2Kek(o.passphrase, b64uDecode(r.salt), r.i as number)), via: 'pw' };
       }
@@ -142,6 +143,7 @@ export async function openEnvelope(input: string | Uint8Array | Envelope, o: Ope
   } else if (o.requireSignature) throw new EnvelopeError('signature', 'unsigned');
 
   const u = await tryUnwrap(e, o);
+  if (!u && e.rcpt.some((r) => r.t === 'pw' && r.kdf !== 'PBKDF2-SHA256')) throw new EnvelopeError('unsupported', 'kdf');
   if (!u) throw new EnvelopeError('key', 'no recipient could be opened');
 
   if (ct.length < 16) throw new EnvelopeError('tampered', 'truncated');

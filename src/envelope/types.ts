@@ -37,10 +37,9 @@ export interface Envelope {
 }
 
 // ---- Seal specs ----
-/** `fixed`/`salt`/`iv` overrides exist for deterministic test vectors only. */
-export interface PwSpec { t: 'pw'; passphrase: string; iterations?: number; salt?: Uint8Array; iv?: Uint8Array }
-export interface CodeSpec { t: 'code'; secret: Uint8Array; salt?: Uint8Array; iv?: Uint8Array }
-export interface GrpSpec { t: 'grp'; groupKey: Uint8Array; epoch: number; salt?: Uint8Array; iv?: Uint8Array }
+export interface PwSpec { t: 'pw'; passphrase: string; iterations?: number }
+export interface CodeSpec { t: 'code'; secret: Uint8Array }
+export interface GrpSpec { t: 'grp'; groupKey: Uint8Array; epoch: number }
 export type RecipientSpec = PwSpec | CodeSpec | GrpSpec;
 
 // ---- Extension hooks (implemented by src/envelope/pq.ts, no edits to core needed) ----
@@ -77,8 +76,6 @@ export interface SealOptions {
   created?: string;
   kem?: KemRecipientProvider;
   signer?: SignatureProvider;
-  /** Test-only deterministic CEK / payload IV. */
-  fixed?: { cek?: Uint8Array; iv?: Uint8Array };
 }
 
 export interface OpenOptions {

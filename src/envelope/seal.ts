@@ -35,7 +35,29 @@ export async function gzip(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(s).arrayBuffer());
 }
 
-export async function sealEnvelope(o: SealOptions): Promise<Envelope> {
+/**
+ * INTERNAL (not exported from index.ts): deterministic parameters for test vectors only.
+ * Reusing a CEK/IV/salt in production breaks AES-GCM; never expose this publicly.
+ */
+export interface FixedSealParams {
+  cek?: Uint8Array;
+  iv?: Uint8Array;
+  /** Per-recipient salt/iv overrides, positionally matching `o.recipients`. */
+  recipients?: Array<{ salt?: Uint8Array; iv?: Uint8Array }>;
+  /** Raw recipient entries prepended (to test forward-compat parsing). */
+  extraRcpt?: Recipient[];
+}
+
+export function sealEnvelope(o: SealOptions): Promise<Envelope> {
+  return sealCore(o);
+}
+
+/** INTERNAL: test/vector generation only. */
+export function sealWithFixedParams(o: SealOptions, fx: FixedSealParams): Promise<Envelope> {
+  return sealCore(o, fx);
+}
+
+async function sealCore(o: SealOptions, fx: FixedSealParams = {}): Promise<Envelope> {
   if (!/^[a-z0-9-]{2,32}$/.test(o.app)) throw new EnvelopeError('format', 'bad app');
   if (typeof o.ns !== 'string' || !o.ns) throw new EnvelopeError('format', 'bad ns');
   if (!/^[a-z0-9-]+@\d+$/.test(o.schema)) throw new EnvelopeError('format', 'bad schema');
@@ -44,15 +66,15 @@ export async function sealEnvelope(o: SealOptions): Promise<Envelope> {
   if (total < 1 || total > MAX_RCPT) throw new EnvelopeError('format', 'rcpt must have 1..8 entries');
 
   const created = o.created ?? new Date().toISOString();
-  const cek = o.fixed?.cek ?? randomBytes(32);
-  const iv = o.fixed?.iv ?? randomBytes(12);
+  const cek = fx.cek ?? randomBytes(32);
+  const iv = fx.iv ?? randomBytes(12);
   if (cek.length !== 32 || iv.length !== 12) throw new EnvelopeError('format', 'bad cek/iv length');
   const h = { app: o.app, ns: o.ns, schema: o.schema, created, seq: o.seq };
 
-  const rcpt: Recipient[] = [];
-  for (const r of o.recipients) {
-    const salt = r.salt ?? randomBytes(16);
-    const riv = r.iv ?? randomBytes(12);
+  const rcpt: Recipient[] = [...(fx.extraRcpt ?? [])];
+  for (const [idx, r] of o.recipients.entries()) {
+    const salt = fx.recipients?.[idx]?.salt ?? randomBytes(16);
+    const riv = fx.recipients?.[idx]?.iv ?? randomBytes(12);
     const aad = wrapAad(r.t, h);
     if (r.t === 'pw') {
       if ([...r.passphrase.normalize('NFKC')].length < PW_MIN_CHARS) throw new EnvelopeError('key', 'passphrase must be >= 12 characters');
