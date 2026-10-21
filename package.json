@@ -32,6 +32,10 @@
       "types": "./dist/r2Client.d.ts",
       "import": "./dist/r2Client.js"
     },
+    "./envelope": {
+      "types": "./dist/envelope/index.d.ts",
+      "import": "./dist/envelope/index.js"
+    },
     "./cloudShare": {
       "types": "./dist/cloudShare.d.ts",
       "import": "./dist/cloudShare.js"
