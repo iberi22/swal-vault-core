@@ -6,7 +6,9 @@ import {
 import { EnvelopeError, type Envelope, type Recipient, type SealOptions } from './types.js';
 import { ENVELOPE_FMT } from './version.js';
 
-export const MAX_FILE_BYTES = 16 * 1024 * 1024;
+import { MAX_FILE_BYTES, MAX_INFLATED, checkCrit } from './limits.js';
+
+export { MAX_FILE_BYTES };
 export const MAX_RCPT = 8;
 const enc = new TextEncoder();
 
@@ -62,6 +64,8 @@ async function sealCore(o: SealOptions, fx: FixedSealParams = {}): Promise<Envel
   if (typeof o.ns !== 'string' || !o.ns) throw new EnvelopeError('format', 'bad ns');
   if (!/^[a-z0-9-]+@\d+$/.test(o.schema)) throw new EnvelopeError('format', 'bad schema');
   if (o.seq !== undefined && !(Number.isSafeInteger(o.seq) && o.seq >= 0)) throw new EnvelopeError('format', 'bad seq');
+  if (o.crit !== undefined) checkCrit(o.crit);
+  if (o.compress === 'gzip' && o.payload.length > MAX_INFLATED) throw new EnvelopeError('too-large', 'inflated payload');
   const total = o.recipients.length + (o.kem ? 1 : 0);
   if (total < 1 || total > MAX_RCPT) throw new EnvelopeError('format', 'rcpt must have 1..8 entries');
 
@@ -108,7 +112,7 @@ async function sealCore(o: SealOptions, fx: FixedSealParams = {}): Promise<Envel
   const ct = await aesGcmEncrypt(cek, iv, body, enc.encode(jcs(header)));
   const env = { ...header, ct: b64uEncode(ct) } as Envelope;
   if (o.signer) env.sig = await o.signer.sign(await signingInput(header, ct));
-  if (serializeEnvelope(env).length > MAX_FILE_BYTES) throw new EnvelopeError('too-large');
+  if (enc.encode(serializeEnvelope(env)).length > MAX_FILE_BYTES) throw new EnvelopeError('too-large');
   return env;
 }
 
