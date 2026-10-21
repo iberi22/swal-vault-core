@@ -184,8 +184,18 @@ describe('behaviour', () => {
     for (let i = 0; i < 3; i++) {
       expect(a.rcpt[i].salt).not.toBe(b.rcpt[i].salt);
       expect(a.rcpt[i].iv).not.toBe(b.rcpt[i].iv);
-      expect(a.rcpt[i].wk).not.toBe(b.rcpt[i].wk); // random CEK => different wrapped key
+      expect(a.rcpt[i].wk).not.toBe(b.rcpt[i].wk); // wk varies via salt and wrap iv (and CEK); CEK alone is covered by the fixed-salt/iv test below
     }
+  });
+  it('wk differs between seals with same salt and wrap iv when no cek is given (random CEK)', async () => {
+    const fx = { iv: new Uint8Array(12).fill(2), recipients: [{ salt: new Uint8Array(16).fill(4), iv: new Uint8Array(12).fill(5) }] };
+    const rec: any = { t: 'grp', groupKey: gk, epoch: 1 };
+    const o = { ...base, recipients: [rec], created: '2026-01-01T00:00:00.000Z' };
+    const a: any = await sealWithFixedParams(o, fx);
+    const b: any = await sealWithFixedParams(o, fx);
+    expect(a.rcpt[0].salt).toBe(b.rcpt[0].salt);
+    expect(a.rcpt[0].iv).toBe(b.rcpt[0].iv);
+    expect(a.rcpt[0].wk).not.toBe(b.rcpt[0].wk);
   });
   it('requireSignature + sig present but no verifier -> signature', async () => {
     const signer: SignatureProvider = {
