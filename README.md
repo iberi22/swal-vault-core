@@ -1,5 +1,7 @@
 # @swal/vault
 
+[![CI](https://github.com/iberi22/swal-vault-core/actions/workflows/ci.yml/badge.svg)](https://github.com/iberi22/swal-vault-core/actions/workflows/ci.yml)
+
 Pure WebCrypto end-to-end encrypted (E2EE) storage core with Shamir's Secret Sharing (2-of-3 threshold), AES-256-GCM authenticated encryption with associated data (AEAD), and zero-knowledge cloud synchronization.
 
 Built for privacy-first, local-first web applications and edge runtimes.
@@ -211,6 +213,10 @@ Creates a browser vault manager backed by IndexedDB.
 - `resetPassphrase(recoveryShare: DEKShare, newPassphrase: string): Promise<void>`: Re-wraps mesh key under a new passphrase.
 
 ---
+
+## Security
+
+Please refer to the [SECURITY.md](SECURITY.md) file for supported versions, vulnerability reporting instructions, and response targets.
 
 ## Security Notes
 
